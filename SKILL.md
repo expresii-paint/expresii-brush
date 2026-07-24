@@ -145,10 +145,26 @@ Expresii uses a normalized 3D coordinate system centered on the canvas. From the
    "wprofile":"Level 1 — Driest","sprofile":"Build Up"}`. `build_composite()`
    prepends a single `c` (clear) and joins the blocks; each block keeps its own
    bookends (open = lead+trail lift, closed loop = leading lift only).
-5. **Optionally set the brush color** with one `l` command per node (0–8). Default is white-to-grey. See the example in the upstream spec for the format.
-6. **Build the stroke frames.** Each `s` line is one brush posture; consecutive frames with changing x/y/pressure form a continuous stroke. Pressure usually ramps: 0 → peak → 0 over the stroke length. For multiple disconnected strokes, add a frame with pressure 0 (lift) before starting the next.
-7. **Send via the helper.** Either write the XST to a temp file and pass it to the helper, or use `--command` / `--stroke` / `--pstroke` / `--composite` flags. Read the result — `OK  sent N chars` on success, `FAIL  no_response` if the server didn't reply.
-8. **Iterate.** If the stroke looks wrong (Expresii shows a stroke-recorder window), adjust waypoints, pressure profile, or brush params and re-send. Use `c` to clear the canvas between attempts.
+5. **Set the brush color** (optional). Expresii loads color per brush NODE
+   (0=tip .. 8=root) — you must emit an `l` for **all 9 nodes** or the rest
+   stay default. The helper does this for you:
+   - **Named color** — `paint("dry_brush_line", color="Vermilion")` or
+     `--preset dry_brush_line --color Vermilion`. Also accepts `"r,g,b"`,
+     `"#rrggbb"`, or a `COLOR_PROFILES` name (Indigo, Cobalt, SapGreen,
+     Vermilion, Cadmium, Ochre, Magenta, PaynesGray, Sepia, Black, White).
+   - **Gradient along the stroke** — pass a `COLOR_RAMP_PROFILES` name
+     (WarmToCool, CoolToWarm, LightToDark, HueCycle). The helper emits a
+     per-node `l` at each segment so the color ramps along the path.
+   - **Default** is white-to-grey if you pass no color.
+6. **Use the stroke library** (optional, saves re-deriving params). The helper
+   ships `STROKE_LIBRARY` presets you can call by name:
+   `dry_brush_line`, `wet_wash_line`, `calligraphy_curve`, `scratchy_loop`,
+   `bold_dot`. Build one with `paint(name, color=...)` (Python) or
+   `--preset NAME [--color SPEC]` (CLI). Each preset bundles path + profiles;
+   override any field (size, profiles, waypoints) via `paint(name, **overrides)`.
+7. **Build the stroke frames.** Each `s` line is one brush posture; consecutive frames with changing x/y/pressure form a continuous stroke. Pressure usually ramps: 0 → peak → 0 over the stroke length. For multiple disconnected strokes, add a frame with pressure 0 (lift) before starting the next.
+8. **Send via the helper.** Either write the XST to a temp file and pass it to the helper, or use `--command` / `--stroke` / `--pstroke` / `--preset` / `--circle` / `--composite` flags. Read the result — `OK  sent N chars` on success, `FAIL  no_response` if the server didn't reply.
+9. **Iterate.** If the stroke looks wrong (Expresii shows a stroke-recorder window), adjust waypoints, pressure profile, color, or brush params and re-send. Use `c` to clear the canvas between attempts.
 
 ## Pitfalls
 

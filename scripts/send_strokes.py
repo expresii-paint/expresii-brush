@@ -94,7 +94,7 @@ def send_xst(host: str, port: int, xst_text: str, timeout: float = 10.0,
 def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
                 size: float = 6.0, wetness: float = 0.5, scratch: float = 0.5,
                 n_frames: int = 96, pressure_plateau: float = 0.75,
-                clear_first: bool = True) -> str:
+                clear_first: bool = True, color=None) -> str:
     """
     Build a closed circle XST. Returns a ready-to-send stroke string.
 
@@ -112,7 +112,16 @@ def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
     lines = []
     if clear_first:
         lines.append("c")
-    lines += [f"B {size:.5f}", f"w {wetness:.5f}", f"i {scratch:.5f}"]
+    lines += [f"B {size:.5f}", f"w {wetness:.5f}"]
+    if color is not None:
+        if color in COLOR_RAMP_PROFILES:
+            h, s, l_ = _ramp_color_at(COLOR_RAMP_PROFILES[color], 0.5)
+            for line in _color_l_all_nodes(_hsl_to_rgb(h, s, l_)):
+                lines.append(line)
+        else:
+            for line in _color_l_all_nodes(parse_color(color)):
+                lines.append(line)
+    lines.append(f"i {scratch:.5f}")
 
     # Bookend (brush down): lifted, just before the seam. This puts the brush
     # down onto the paper so Expresii registers contact. We do NOT add a trailing
@@ -231,6 +240,179 @@ SCRATCH_PROFILES = {  # values 0..1
     "Mid Spike":  [(0.0, 0.0), (0.3, 0.0), (0.5, 0.8), (0.7, 0.0), (1.0, 0.0)],
 }
 
+# ---------------------------------------------------------------------------
+# Color
+# Expresii sets brush color with `l <node> R G B A` (each 0..255). The color is
+# brush-global: it applies to subsequent strokes until changed. We expose named
+# fixed colors plus color-RAMP profiles (HSL endpoints interpolated along the
+# stroke) for gradients. `parse_color` also accepts "r,g,b" or "#rrggbb".
+# ---------------------------------------------------------------------------
+COLOR_PROFILES = {  # fixed RGB (0..255)
+    "Black":      (0, 0, 0),
+    "White":      (245, 245, 245),
+    "Indigo":     (40, 50, 120),
+    "Cobalt":     (30, 80, 180),
+    "SapGreen":    (40, 110, 50),
+    "Viridian":   (20, 120, 110),
+    "Vermilion":  (210, 60, 30),
+    "Cadmium":    (220, 110, 20),
+    "Ochre":      (180, 140, 60),
+    "Magenta":    (170, 40, 110),
+    "PaynesGray": (50, 60, 70),
+    "Sepia":      (90, 60, 40),
+}
+COLOR_RAMP_PROFILES = {  # HSL ramps (h 0..360, s/l 0..1) along progress t in [0,1]
+    "WarmToCool": [(0.0, (15, 0.8, 0.5)), (1.0, (220, 0.7, 0.45))],
+    "CoolToWarm": [(0.0, (220, 0.7, 0.45)), (1.0, (15, 0.8, 0.5))],
+    "LightToDark":[(0.0, (40, 0.3, 0.8)), (1.0, (40, 0.9, 0.2))],
+    "HueCycle":   [(0.0, (0, 0.8, 0.5)), (0.5, (180, 0.8, 0.5)), (1.0, (360, 0.8, 0.5))],
+}
+
+
+def _hsl_to_rgb(h: float, s: float, l: float):
+    """h in [0,360), s/l in [0,1] -> (r,g,b) in 0..255."""
+    h = ((h % 360) + 360) % 360 / 360.0
+    if s == 0:
+        v = round(l * 255)
+        return (v, v, v)
+    q = l * (1 + s) if l < 0.5 else l + s - l * s
+    p = 2 * l - q
+    def hue(pc):
+        if pc < 0:
+            pc += 1
+        if pc > 1:
+            pc -= 1
+        if pc < 1 / 6:
+            return p + (q - p) * 6 * pc
+        if pc < 1 / 2:
+            return q
+        if pc < 2 / 3:
+            return p + (q - p) * (2 / 3 - pc) * 6
+        return p
+    return tuple(round(c * 255) for c in (hue(h + 1/3), hue(h), hue(h - 1/3)))
+
+
+def parse_color(spec) -> tuple:
+    """Resolve a color spec to an (r,g,b) 0..255 tuple.
+
+    Accepts: a COLOR_PROFILES name, a "r,g,b" string, or a "#rrggbb" hex.
+    Raises ValueError if unparseable.
+    """
+    if isinstance(spec, (tuple, list)) and len(spec) == 3:
+        return tuple(int(round(c)) for c in spec)
+    s = str(spec).strip()
+    if s in COLOR_PROFILES:
+        return COLOR_PROFILES[s]
+    if s.startswith("#"):
+        h = s[1:]
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        if len(h) == 6:
+            return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+    if "," in s:
+        parts = [float(v) for v in s.split(",")]
+        if len(parts) == 3:
+            return tuple(int(round(v)) for v in parts)
+    raise ValueError(f"unknown color: {spec!r}")
+
+
+def _color_l_command(rgb, alpha: int = 255, node: int = 0) -> str:
+    r, g, b = (max(0, min(255, int(round(v)))) for v in rgb)
+    return f"l {node} {r} {g} {b} {alpha}"
+
+
+def _color_l_all_nodes(rgb, alpha: int = 255) -> list:
+    """Expresii loads color per brush NODE (0..8, tip->root). Set all 9 so the
+    whole brush carries the color (a single l 0 leaves the rest default)."""
+    return [_color_l_command(rgb, alpha, node) for node in range(9)]
+
+
+def _ramp_color_at(ramp, t: float):
+    """Interpolate a COLOR_RAMP_PROFILES entry (HSL endpoints) at progress t."""
+    h0, s0, l0 = ramp[0][1]
+    h1, s1, l1 = ramp[-1][1]
+    if len(ramp) == 2:
+        h = h0 + (h1 - h0) * t
+        s = s0 + (s1 - s0) * t
+        l = l0 + (l1 - l0) * t
+        return h, s, l
+    # 3+ stops: piecewise
+    pts = [(pt[0], pt[1]) for pt in ramp]
+    if t <= pts[0][0]:
+        return pts[0][1]
+    if t >= pts[-1][0]:
+        return pts[-1][1]
+    for (t0, c0), (t1, c1) in zip(pts, pts[1:]):
+        if t0 <= t <= t1:
+            f = (t - t0) / (t1 - t0) if t1 != t0 else 0.0
+            return (c0[0] + (c1[0] - c0[0]) * f,
+                    c0[1] + (c1[1] - c0[1]) * f,
+                    c0[2] + (c1[2] - c0[2]) * f)
+    return pts[-1][1]
+
+
+# ---------------------------------------------------------------------------
+# Stroke library — named presets bundling path + profile choices, so the agent
+# can call paint("dry_brush_line") instead of re-deriving parameters each time.
+# Each entry: dict with 'waypoints' (or 'shape'), and profile names. Used by
+# paint() and the --preset CLI flag.
+# ---------------------------------------------------------------------------
+STROKE_LIBRARY = {
+    "dry_brush_line": {
+        "waypoints": [(-1.5, 0.0), (1.5, 0.0)],
+        "pprofile": "Standard", "wprofile": "Level 1 — Driest", "sprofile": "Build Up",
+        "size": 5,
+    },
+    "wet_wash_line": {
+        "waypoints": [(-1.5, 0.0), (1.5, 0.0)],
+        "pprofile": "Smooth Bell", "wprofile": "Level 12 — Wettest", "sprofile": "None",
+        "size": 6,
+    },
+    "calligraphy_curve": {
+        "waypoints": [(-1.5, -0.6), (-0.5, 0.4), (0.5, 0.4), (1.5, -0.6)],
+        "pprofile": "Fade In", "wprofile": "Level 5 — Medium", "sprofile": "Medium",
+        "size": 5,
+    },
+    "scratchy_loop": {
+        "closed": True, "waypoints": [(-1.0, 0.0), (0.0, 1.0), (1.0, 0.0), (0.0, -1.0)],
+        "pprofile": "Constant", "wprofile": "Level 1 — Driest", "sprofile": "Heavy",
+        "size": 5,
+    },
+    "bold_dot": {
+        "radius": 0.4, "pprofile": None, "wprofile": "Level 8 — Medium", "sprofile": "None",
+        "size": 7,
+    },
+}
+
+
+def paint(name: str, color=None, **overrides) -> str:
+    """Build one stroke from the STROKE_LIBRARY preset, with optional overrides.
+
+    color: a name / "r,g,b" / "#rrggbb" (fixed) or a COLOR_RAMP_PROFILES name
+           (gradient along the stroke).
+    overrides: any preset key (pprofile, wprofile, sprofile, size, waypoints, ...).
+    """
+    if name not in STROKE_LIBRARY:
+        raise ValueError(f"unknown preset: {name!r} (have: {sorted(STROKE_LIBRARY)})")
+    cfg = dict(STROKE_LIBRARY[name])
+    cfg.update(overrides)
+    closed = cfg.get("closed", False)
+    wps = cfg.get("waypoints")
+    if wps is not None:
+        waypoints = [(float(x), float(y), 0.5) for (x, y) in wps]
+        return build_profile_stroke(
+            waypoints, size=cfg.get("size", 5),
+            pprofile=cfg.get("pprofile", "Standard"),
+            wprofile=cfg.get("wprofile", "Level 5 — Medium"),
+            sprofile=cfg.get("sprofile", "None"),
+            segments=cfg.get("segments", 16), closed=closed, color=color)
+    # shape-based preset (e.g. bold_dot uses a circle)
+    return build_circle(
+        cx=cfg.get("cx", 0.0), cy=cfg.get("cy", 0.0), radius=cfg.get("radius", 1.0),
+        size=cfg.get("size", 6), wetness=cfg.get("wetness", 0.5),
+        scratch=cfg.get("scratch", 0.5), clear_first=False, color=color)
+
+
 
 def _interp(pts: list, t: float) -> float:
     """Piecewise-linear interpolation of a [(t, v), ...] curve at progress t."""
@@ -253,7 +435,7 @@ def _interp(pts: list, t: float) -> float:
 def build_profile_stroke(waypoints: list, size: float = 6.0,
                          pprofile: str = "Standard", wprofile: str = "Level 5 — Medium",
                          sprofile: str = "None", segments: int = 16,
-                         closed: bool = False) -> str:
+                         closed: bool = False, color=None) -> str:
     """
     Build an XST stroke using named pressure/wetness/scratch profiles.
 
@@ -306,6 +488,16 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
         return pts[-1]
 
     lines = ["# Generated by expresii-brush (profile stroke)", f"B {size:.5f}"]
+
+    # Color: a ramp profile emits an `l` per node per segment (gradient along
+    # the stroke); a fixed color emits `l` for all 9 brush nodes; None leaves
+    # the default brush color. Expresii loads color per brush NODE (0..8), so we
+    # set every node or the rest stays default.
+    ramp = COLOR_RAMP_PROFILES.get(color) if isinstance(color, str) else None
+    if ramp is None and color is not None:
+        for line in _color_l_all_nodes(parse_color(color)):
+            lines.append(line)
+
     # leading lift bookend (brush down) at first waypoint
     x0, y0, _ = waypoints[0]
     lines.append(f"s {x0:.5f} {y0:.5f} 0.06250 0 0 0 0.00000")
@@ -324,6 +516,10 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
         # re-issue wetness/scratch so it tracks the profile (brush stays down)
         lines.append(f"w {wlvl / 12:.5f}")
         lines.append(f"i {sval:.5f}")
+        if ramp is not None:
+            h, s, l_ = _ramp_color_at(ramp, t)
+            for line in _color_l_all_nodes(_hsl_to_rgb(h, s, l_)):
+                lines.append(line)
         lines.append(f"s {x:.5f} {y:.5f} {z:.5f} 0 0 0 {p:.5f}")
 
     if not closed:
@@ -465,6 +661,13 @@ def main():
                          '[{"type":"circle","cy":1.4},{"type":"profile","waypoints":[[-1.5,0],[1.5,0]],'
                          '"pprofile":"Standard","wprofile":"Level 1 — Driest","sprofile":"Build Up"}]. '
                          "Each descriptor maps to build_circle()/build_profile_stroke().")
+    ap.add_argument("--preset", metavar="NAME",
+                    help="Build a stroke from the STROKE_LIBRARY preset (e.g. dry_brush_line, "
+                         "wet_wash_line, calligraphy_curve, scratchy_loop, bold_dot). Use with --color.")
+    ap.add_argument("--color", metavar="SPEC",
+                    help="Brush color for --preset / --pstroke / --circle. A COLOR_PROFILES name "
+                         "(e.g. Vermilion), 'r,g,b', '#rrggbb', or a COLOR_RAMP_PROFILES name "
+                         "(WarmToCool, CoolToWarm, LightToDark, HueCycle) for a gradient.")
     args = ap.parse_args()
 
     if args.ping:
@@ -484,7 +687,13 @@ def main():
             sys.exit(2)
         xst_text = path.read_text(encoding="utf-8")
     elif args.circle is not None:
-        xst_text = build_circle(radius=args.circle)
+        xst_text = build_circle(radius=args.circle, color=args.color)
+    elif args.preset:
+        try:
+            xst_text = paint(args.preset, color=args.color)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(2)
     elif args.pstroke:
         try:
             waypoints = [tuple(float(v) for v in s.split(",")) for s in args.pstroke]
@@ -498,7 +707,7 @@ def main():
             xst_text = build_profile_stroke(
                 waypoints, size=args.size, pprofile=args.pprofile,
                 wprofile=args.wprofile, sprofile=args.sprofile,
-                segments=args.segments, closed=args.closed)
+                segments=args.segments, closed=args.closed, color=args.color)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(2)

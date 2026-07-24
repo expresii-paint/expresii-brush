@@ -1,10 +1,10 @@
 """Deterministic generation tests for the expresii-brush skill.
 
 These cover the PURE logic in send_strokes.py — profile catalog, curve
-interpolation, bookend rules, polyline path interpolation, and composite
-joining. They do NOT touch the network (no live Expresii server required),
-so they run green in CI. The live send/verify path is covered by ad-hoc
-verification against a running server.
+interpolation, bookend rules, polyline path interpolation, composite joining,
+color, and the stroke library. They do NOT touch the network (no live Expresii
+server required), so they run green in CI. The live send/verify path is covered
+by ad-hoc verification against a running server.
 
 Run with:  pytest tests/test_send_strokes.py -v
 """
@@ -22,11 +22,19 @@ from send_strokes import (  # noqa: E402
     PRESSURE_PROFILES,
     WETNESS_PROFILES,
     SCRATCH_PROFILES,
+    COLOR_PROFILES,
+    COLOR_RAMP_PROFILES,
+    STROKE_LIBRARY,
     _interp,
+    parse_color,
+    _hsl_to_rgb,
+    _color_l_all_nodes,
+    _ramp_color_at,
     build_circle,
     build_stroke_command,
     build_profile_stroke,
     build_composite,
+    paint,
 )
 
 
@@ -162,3 +170,66 @@ def test_build_composite_strips_sub_builder_clear():
     # build_circle emits its own `c`; composite must not double it
     comp = build_composite([build_circle(), build_circle()])
     assert comp.count("c\n") == 1, comp.count("c\n")
+
+
+# ── Color ─────────────────────────────────────────────────────────────────
+
+def test_parse_color_name_hex_rgb():
+    assert parse_color("Vermilion") == (210, 60, 30)
+    assert parse_color("255,0,0") == (255, 0, 0)
+    assert parse_color("#00ff00") == (0, 255, 0)
+    assert parse_color("#abc") == (170, 187, 204)
+    assert parse_color((10, 20, 30)) == (10, 20, 30)
+
+
+def test_hsl_to_rgb_pure_red():
+    r, g, b = _hsl_to_rgb(0, 0.8, 0.5)
+    assert r > 200 and g < 80 and b < 80
+
+
+def test_color_all_nodes_emitted():
+    # Expresii loads color per brush node (0..8); we must set all 9.
+    lines = _color_l_all_nodes((10, 20, 30))
+    assert len(lines) == 9
+    assert lines[0] == "l 0 10 20 30 255"
+    assert lines[-1] == "l 8 10 20 30 255"
+
+
+def test_fixed_color_emits_all_node_commands():
+    xst = build_profile_stroke([(-1.0, 0.0, 0.5), (1.0, 0.0, 0.5)], size=5, color="Cobalt")
+    # 9 nodes for the fixed color, all identical RGB
+    assert xst.count("l 0 30 80 180 255") == 1
+    assert xst.count("\nl ") == 9, xst.count("\nl ")
+
+
+def test_ramp_color_emits_per_segment_nodes():
+    xst = build_profile_stroke([(-1.0, 0.0, 0.5), (1.0, 0.0, 0.5)], size=5,
+                               color="WarmToCool", segments=8)
+    # ramp -> 9 nodes per segment frame region (>= 9 l commands)
+    assert xst.count("\nl ") >= 9, xst.count("\nl ")
+
+
+def test_circle_color_emits_all_nodes():
+    xst = build_circle(radius=1.0, color="Indigo")
+    assert xst.count("l 0 40 50 120 255") == 1
+    assert xst.count("\nl ") == 9
+
+
+# ── Stroke library ────────────────────────────────────────────────────────
+
+def test_stroke_library_presets_build():
+    for name in STROKE_LIBRARY:
+        blk = paint(name)
+        assert "B" in blk, name
+        # each preset must carry a leading clear-free stroke block
+        assert blk.lstrip().startswith(("B", "#", "c")), name
+
+
+def test_paint_override_color():
+    p = paint("dry_brush_line", color="Vermilion")
+    assert "l 0 210 60 30 255" in p
+
+
+def test_paint_unknown_preset_raises():
+    with pytest.raises(ValueError):
+        paint("does_not_exist")
