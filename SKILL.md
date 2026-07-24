@@ -146,15 +146,21 @@ Expresii uses a normalized 3D coordinate system centered on the canvas. From the
    prepends a single `c` (clear) and joins the blocks; each block keeps its own
    bookends (open = lead+trail lift, closed loop = leading lift only).
 5. **Set the brush color** (optional). Expresii loads color per brush NODE
-   (0=tip .. 8=root) — you must emit an `l` for **all 9 nodes** or the rest
-   stay default. The helper does this for you:
-   - **Named color** — `paint("dry_brush_line", color="Vermilion")` or
+   (0=tip .. 8=root). The 9 node colors form a gradient **along the brush tuft**;
+   to paint that gradient **across the stroke width** you tilt the brush
+   (Tilt-Y in the `s` frames) so the tuft lies sideways. The helper does this
+   for you:
+   - **Solid color** — `paint("dry_brush_line", color="Vermilion")` or
      `--preset dry_brush_line --color Vermilion`. Also accepts `"r,g,b"`,
      `"#rrggbb"`, or a `COLOR_PROFILES` name (Indigo, Cobalt, SapGreen,
      Vermilion, Cadmium, Ochre, Magenta, PaynesGray, Sepia, Black, White).
-   - **Gradient along the stroke** — pass a `COLOR_RAMP_PROFILES` name
-     (WarmToCool, CoolToWarm, LightToDark, HueCycle). The helper emits a
-     per-node `l` at each segment so the color ramps along the path.
+     All 9 nodes get the same color.
+   - **Tuft gradient** — pass two colors as `"tip:root"` (e.g.
+     `"Cobalt:Vermilion"`) or a `COLOR_RAMP_PROFILES` name (WarmToCool,
+     CoolToWarm, LightToDark, HueCycle). The helper sets node 0 = tip color,
+     node 8 = root color, interpolated between — a gradient across the tuft.
+     A gradient **auto-tilts the brush 45°** so the gradient shows across the
+     stroke; override with `--tilt DEG` (set 0 for a flat, lengthwise tuft).
    - **Default** is white-to-grey if you pass no color.
 6. **Use the stroke library** (optional, saves re-deriving params). The helper
    ships `STROKE_LIBRARY` presets you can call by name:

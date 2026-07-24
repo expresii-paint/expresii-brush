@@ -2,9 +2,9 @@
 
 These cover the PURE logic in send_strokes.py — profile catalog, curve
 interpolation, bookend rules, polyline path interpolation, composite joining,
-color, and the stroke library. They do NOT touch the network (no live Expresii
-server required), so they run green in CI. The live send/verify path is covered
-by ad-hoc verification against a running server.
+color (tuft-gradient model), and the stroke library. They do NOT touch the
+network (no live Expresii server required), so they run green in CI. The live
+send/verify path is covered by ad-hoc verification against a running server.
 
 Run with:  pytest tests/test_send_strokes.py -v
 """
@@ -28,8 +28,10 @@ from send_strokes import (  # noqa: E402
     _interp,
     parse_color,
     _hsl_to_rgb,
+    _lerp_rgb,
+    _resolve_color,
+    _color_l_gradient,
     _color_l_all_nodes,
-    _ramp_color_at,
     build_circle,
     build_stroke_command,
     build_profile_stroke,
@@ -172,7 +174,7 @@ def test_build_composite_strips_sub_builder_clear():
     assert comp.count("c\n") == 1, comp.count("c\n")
 
 
-# ── Color ─────────────────────────────────────────────────────────────────
+# ── Color (tuft-gradient model) ───────────────────────────────────────────
 
 def test_parse_color_name_hex_rgb():
     assert parse_color("Vermilion") == (210, 60, 30)
@@ -187,32 +189,55 @@ def test_hsl_to_rgb_pure_red():
     assert r > 200 and g < 80 and b < 80
 
 
-def test_color_all_nodes_emitted():
-    # Expresii loads color per brush node (0..8); we must set all 9.
+def test_resolve_color_routing():
+    assert _resolve_color(None) is None
+    assert _resolve_color("Vermilion") == ("solid", (210, 60, 30))
+    assert _resolve_color("WarmToCool")[0] == "gradient"
+    assert _resolve_color("Cobalt:Vermilion")[0] == "gradient"
+    assert _resolve_color(("Cobalt", "Vermilion"))[0] == "gradient"
+
+
+def test_color_gradient_sets_9_nodes_tip_to_root():
+    # Expresii loads color per brush node (0..8, tip->root). A tuft gradient
+    # sets node 0 = tip, node 8 = root, interpolated between.
+    g = _color_l_gradient((10, 20, 30), (200, 100, 50))
+    assert len(g) == 9
+    assert g[0] == "l 0 10 20 30 255"
+    assert g[8] == "l 8 200 100 50 255"
+    assert g[4] == "l 4 105 60 40 255"  # midpoint lerp
+
+
+def test_color_all_nodes_emitted_for_solid():
     lines = _color_l_all_nodes((10, 20, 30))
     assert len(lines) == 9
     assert lines[0] == "l 0 10 20 30 255"
     assert lines[-1] == "l 8 10 20 30 255"
 
 
-def test_fixed_color_emits_all_node_commands():
-    xst = build_profile_stroke([(-1.0, 0.0, 0.5), (1.0, 0.0, 0.5)], size=5, color="Cobalt")
-    # 9 nodes for the fixed color, all identical RGB
+def test_gradient_stroke_emits_tuft_gradient_once_and_auto_tilts():
+    # A tuft gradient is a brush property, set ONCE (not per path-segment).
+    xst = build_profile_stroke([(-1.5, 0.0, 0.5), (1.5, 0.0, 0.5)], size=6,
+                               color="Cobalt:Vermilion", segments=10)
+    # 9 nodes, each emitted exactly once (tip!=root)
     assert xst.count("l 0 30 80 180 255") == 1
+    assert xst.count("l 8 210 60 30 255") == 1
     assert xst.count("\nl ") == 9, xst.count("\nl ")
+    # gradient auto-tilts the brush 45 deg so the tuft gradient shows across width
+    assert " 45.00000 0 0 " in xst
 
 
-def test_ramp_color_emits_per_segment_nodes():
-    xst = build_profile_stroke([(-1.0, 0.0, 0.5), (1.0, 0.0, 0.5)], size=5,
-                               color="WarmToCool", segments=8)
-    # ramp -> 9 nodes per segment frame region (>= 9 l commands)
-    assert xst.count("\nl ") >= 9, xst.count("\nl ")
+def test_solid_color_no_autotilt_when_tilt_explicit_zero():
+    xst = build_profile_stroke([(-1.5, 0.0, 0.5), (1.5, 0.0, 0.5)], size=6,
+                               color="Vermilion", tilt=0.0)
+    assert " 0.00000 0 0 " in xst
 
 
-def test_circle_color_emits_all_nodes():
-    xst = build_circle(radius=1.0, color="Indigo")
-    assert xst.count("l 0 40 50 120 255") == 1
+def test_circle_gradient_emits_9_nodes_and_tilts():
+    xst = build_circle(radius=1.0, color="Cobalt:Vermilion")
+    assert xst.count("l 0 30 80 180 255") == 1
+    assert xst.count("l 8 210 60 30 255") == 1
     assert xst.count("\nl ") == 9
+    assert " 45.00000 0 0 " in xst  # auto-tilt for gradient
 
 
 # ── Stroke library ────────────────────────────────────────────────────────
@@ -221,7 +246,6 @@ def test_stroke_library_presets_build():
     for name in STROKE_LIBRARY:
         blk = paint(name)
         assert "B" in blk, name
-        # each preset must carry a leading clear-free stroke block
         assert blk.lstrip().startswith(("B", "#", "c")), name
 
 

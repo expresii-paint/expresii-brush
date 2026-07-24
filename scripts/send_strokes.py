@@ -94,7 +94,7 @@ def send_xst(host: str, port: int, xst_text: str, timeout: float = 10.0,
 def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
                 size: float = 6.0, wetness: float = 0.5, scratch: float = 0.5,
                 n_frames: int = 96, pressure_plateau: float = 0.75,
-                clear_first: bool = True, color=None) -> str:
+                clear_first: bool = True, color=None, tilt: float = 0.0) -> str:
     """
     Build a closed circle XST. Returns a ready-to-send stroke string.
 
@@ -113,13 +113,19 @@ def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
     if clear_first:
         lines.append("c")
     lines += [f"B {size:.5f}", f"w {wetness:.5f}"]
-    if color is not None:
-        if color in COLOR_RAMP_PROFILES:
-            h, s, l_ = _ramp_color_at(COLOR_RAMP_PROFILES[color], 0.5)
-            for line in _color_l_all_nodes(_hsl_to_rgb(h, s, l_)):
+    # Color: set the brush NODES (0..8, tip->root). A tuft gradient (tip!=root)
+    # paints a color transition across the brush; with Tilt-Y (see s frames)
+    # the tuft lies sideways so the gradient shows across the stroke WIDTH.
+    cres = _resolve_color(color)
+    if cres is not None:
+        kind, *cargs = cres
+        if kind == "gradient":
+            for line in _color_l_gradient(*cargs):
                 lines.append(line)
+            if tilt == 0.0:
+                tilt = 45.0  # default tilt so a tuft gradient is visible
         else:
-            for line in _color_l_all_nodes(parse_color(color)):
+            for line in _color_l_all_nodes(cargs[0]):
                 lines.append(line)
     lines.append(f"i {scratch:.5f}")
 
@@ -133,7 +139,7 @@ def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
 
     a0 = -seam_pad
     lines.append(f"s {cx + radius*math.cos(a0):.5f} {cy + radius*math.sin(a0):.5f} "
-                 f"0.06250 0 0 0 0.00000")
+                 f"0.06250 {tilt:.5f} 0 0 0.00000")
 
     # Real frames: from -pad through 2pi+pad (overlapping the seam).
     n_total = n_frames + 2
@@ -150,7 +156,7 @@ def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
         else:
             p = pressure_plateau
         z = 0.0625 - 0.125 * p
-        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} 0 0 0 {p:.5f}")
+        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {tilt:.5f} 0 0 {p:.5f}")
 
     return "\n".join(lines) + "\n"
 
@@ -316,6 +322,10 @@ def parse_color(spec) -> tuple:
     raise ValueError(f"unknown color: {spec!r}")
 
 
+def _lerp_rgb(a, b, f):
+    return tuple(int(round(a[i] + (b[i] - a[i]) * f)) for i in range(3))
+
+
 def _color_l_command(rgb, alpha: int = 255, node: int = 0) -> str:
     r, g, b = (max(0, min(255, int(round(v)))) for v in rgb)
     return f"l {node} {r} {g} {b} {alpha}"
@@ -323,32 +333,44 @@ def _color_l_command(rgb, alpha: int = 255, node: int = 0) -> str:
 
 def _color_l_all_nodes(rgb, alpha: int = 255) -> list:
     """Expresii loads color per brush NODE (0..8, tip->root). Set all 9 so the
-    whole brush carries the color (a single l 0 leaves the rest default)."""
+    whole brush carries the same color (a single l 0 leaves the rest default)."""
     return [_color_l_command(rgb, alpha, node) for node in range(9)]
 
 
-def _ramp_color_at(ramp, t: float):
-    """Interpolate a COLOR_RAMP_PROFILES entry (HSL endpoints) at progress t."""
-    h0, s0, l0 = ramp[0][1]
-    h1, s1, l1 = ramp[-1][1]
-    if len(ramp) == 2:
-        h = h0 + (h1 - h0) * t
-        s = s0 + (s1 - s0) * t
-        l = l0 + (l1 - l0) * t
-        return h, s, l
-    # 3+ stops: piecewise
-    pts = [(pt[0], pt[1]) for pt in ramp]
-    if t <= pts[0][0]:
-        return pts[0][1]
-    if t >= pts[-1][0]:
-        return pts[-1][1]
-    for (t0, c0), (t1, c1) in zip(pts, pts[1:]):
-        if t0 <= t <= t1:
-            f = (t - t0) / (t1 - t0) if t1 != t0 else 0.0
-            return (c0[0] + (c1[0] - c0[0]) * f,
-                    c0[1] + (c1[1] - c0[1]) * f,
-                    c0[2] + (c1[2] - c0[2]) * f)
-    return pts[-1][1]
+def _color_l_gradient(rgb_tip, rgb_root, alpha: int = 255) -> list:
+    """Set a color GRADIENT across the brush tuft: node 0 (tip) = rgb_tip,
+    node 8 (root) = rgb_root, linearly interpolated between. Tilting the brush
+    (Tilt-Y/X in the `s` frames) lays the tuft sideways so this gradient paints
+    across the stroke WIDTH. Flat (no tilt) shows it only along the tuft length."""
+    return [_color_l_command(_lerp_rgb(rgb_tip, rgb_root, i / 8), alpha, i)
+            for i in range(9)]
+
+
+def _resolve_color(spec):
+    """Resolve a color spec into one of:
+      None                         -> leave default brush color
+      ("solid",   rgb)             -> all 9 nodes same
+      ("gradient", rgb_tip, rgb_root) -> tuft gradient (tip->root)
+    Accepts: a name / "r,g,b" / "#rrggbb" (solid); a COLOR_RAMP_PROFILES name
+    (gradient using its start/end HSL); or "tip:root" / (c1, c2) pair
+    (explicit tuft gradient between two colors)."""
+    if spec is None:
+        return None
+    if isinstance(spec, (tuple, list)) and len(spec) == 2 and not (
+            isinstance(spec[0], (int, float)) and len(spec) == 3):
+        # pair of colors -> explicit tuft gradient
+        return ("gradient", parse_color(spec[0]), parse_color(spec[1]))
+    if isinstance(spec, str):
+        ramp = COLOR_RAMP_PROFILES.get(spec)
+        if ramp is not None:
+            h0, s0, l0 = ramp[0][1]
+            h1, s1, l1 = ramp[-1][1]
+            return ("gradient", _hsl_to_rgb(h0, s0, l0), _hsl_to_rgb(h1, s1, l1))
+        if ":" in spec:
+            a, b = spec.split(":", 1)
+            return ("gradient", parse_color(a), parse_color(b))
+        return ("solid", parse_color(spec))
+    return ("solid", parse_color(spec))
 
 
 # ---------------------------------------------------------------------------
@@ -388,15 +410,18 @@ STROKE_LIBRARY = {
 def paint(name: str, color=None, **overrides) -> str:
     """Build one stroke from the STROKE_LIBRARY preset, with optional overrides.
 
-    color: a name / "r,g,b" / "#rrggbb" (fixed) or a COLOR_RAMP_PROFILES name
-           (gradient along the stroke).
-    overrides: any preset key (pprofile, wprofile, sprofile, size, waypoints, ...).
+    color: a name / "r,g,b" / "#rrggbb" (solid); "tip:root" or a
+           COLOR_RAMP_PROFILES name (tuft gradient across the brush).
+    tilt:  brush tilt in degrees (Tilt-Y). A gradient auto-defaults to 45° so
+           the tuft lies sideways and the gradient shows across the stroke.
+    overrides: any preset key (pprofile, wprofile, sprofile, size, tilt, ...).
     """
     if name not in STROKE_LIBRARY:
         raise ValueError(f"unknown preset: {name!r} (have: {sorted(STROKE_LIBRARY)})")
     cfg = dict(STROKE_LIBRARY[name])
     cfg.update(overrides)
     closed = cfg.get("closed", False)
+    tilt = cfg.get("tilt", 0.0)
     wps = cfg.get("waypoints")
     if wps is not None:
         waypoints = [(float(x), float(y), 0.5) for (x, y) in wps]
@@ -405,12 +430,12 @@ def paint(name: str, color=None, **overrides) -> str:
             pprofile=cfg.get("pprofile", "Standard"),
             wprofile=cfg.get("wprofile", "Level 5 — Medium"),
             sprofile=cfg.get("sprofile", "None"),
-            segments=cfg.get("segments", 16), closed=closed, color=color)
+            segments=cfg.get("segments", 16), closed=closed, color=color, tilt=tilt)
     # shape-based preset (e.g. bold_dot uses a circle)
     return build_circle(
         cx=cfg.get("cx", 0.0), cy=cfg.get("cy", 0.0), radius=cfg.get("radius", 1.0),
         size=cfg.get("size", 6), wetness=cfg.get("wetness", 0.5),
-        scratch=cfg.get("scratch", 0.5), clear_first=False, color=color)
+        scratch=cfg.get("scratch", 0.5), clear_first=False, color=color, tilt=tilt)
 
 
 
@@ -435,7 +460,7 @@ def _interp(pts: list, t: float) -> float:
 def build_profile_stroke(waypoints: list, size: float = 6.0,
                          pprofile: str = "Standard", wprofile: str = "Level 5 — Medium",
                          sprofile: str = "None", segments: int = 16,
-                         closed: bool = False, color=None) -> str:
+                         closed: bool = False, color=None, tilt: float = 0.0) -> str:
     """
     Build an XST stroke using named pressure/wetness/scratch profiles.
 
@@ -489,18 +514,26 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
 
     lines = ["# Generated by expresii-brush (profile stroke)", f"B {size:.5f}"]
 
-    # Color: a ramp profile emits an `l` per node per segment (gradient along
-    # the stroke); a fixed color emits `l` for all 9 brush nodes; None leaves
-    # the default brush color. Expresii loads color per brush NODE (0..8), so we
-    # set every node or the rest stays default.
-    ramp = COLOR_RAMP_PROFILES.get(color) if isinstance(color, str) else None
-    if ramp is None and color is not None:
-        for line in _color_l_all_nodes(parse_color(color)):
-            lines.append(line)
+    # Color: set the brush NODES (0..8, tip->root). A tuft gradient paints a
+    # transition across the brush; with Tilt-Y the tuft lies sideways so the
+    # gradient shows across the stroke WIDTH. Set ONCE here (brush-global),
+    # not per path-segment — the tuft gradient is a brush property, not a
+    # path-position property.
+    cres = _resolve_color(color)
+    if cres is not None:
+        kind, *cargs = cres
+        if kind == "gradient":
+            for line in _color_l_gradient(*cargs):
+                lines.append(line)
+            if tilt == 0.0:
+                tilt = 45.0
+        else:
+            for line in _color_l_all_nodes(cargs[0]):
+                lines.append(line)
 
     # leading lift bookend (brush down) at first waypoint
     x0, y0, _ = waypoints[0]
-    lines.append(f"s {x0:.5f} {y0:.5f} 0.06250 0 0 0 0.00000")
+    lines.append(f"s {x0:.5f} {y0:.5f} 0.06250 {tilt:.5f} 0 0 0.00000")
 
     seg = max(1, segments)
     # one continuous stroke: emit an `s` frame at EVERY segment boundary so the
@@ -516,11 +549,7 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
         # re-issue wetness/scratch so it tracks the profile (brush stays down)
         lines.append(f"w {wlvl / 12:.5f}")
         lines.append(f"i {sval:.5f}")
-        if ramp is not None:
-            h, s, l_ = _ramp_color_at(ramp, t)
-            for line in _color_l_all_nodes(_hsl_to_rgb(h, s, l_)):
-                lines.append(line)
-        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} 0 0 0 {p:.5f}")
+        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {tilt:.5f} 0 0 {p:.5f}")
 
     if not closed:
         x1, y1, _ = waypoints[-1]
@@ -665,9 +694,15 @@ def main():
                     help="Build a stroke from the STROKE_LIBRARY preset (e.g. dry_brush_line, "
                          "wet_wash_line, calligraphy_curve, scratchy_loop, bold_dot). Use with --color.")
     ap.add_argument("--color", metavar="SPEC",
-                    help="Brush color for --preset / --pstroke / --circle. A COLOR_PROFILES name "
-                         "(e.g. Vermilion), 'r,g,b', '#rrggbb', or a COLOR_RAMP_PROFILES name "
-                         "(WarmToCool, CoolToWarm, LightToDark, HueCycle) for a gradient.")
+                    help="Brush color for --preset / --pstroke / --circle / --composite. A "
+                         "COLOR_PROFILES name (e.g. Vermilion), 'r,g,b', '#rrggbb', or a tuft "
+                         "GRADIENT: a COLOR_RAMP_PROFILES name (WarmToCool, CoolToWarm, "
+                         "LightToDark, HueCycle) or 'tip:root' (two colors). A gradient "
+                         "auto-tilts the brush 45° so it shows across the stroke; override "
+                         "with --tilt.")
+    ap.add_argument("--tilt", type=float, default=0.0, metavar="DEG",
+                    help="Brush Tilt-Y in degrees (tilts the tuft sideways). A gradient "
+                         "color defaults to 45°; set 0 for a flat (lengthwise) tuft.")
     args = ap.parse_args()
 
     if args.ping:
@@ -687,7 +722,7 @@ def main():
             sys.exit(2)
         xst_text = path.read_text(encoding="utf-8")
     elif args.circle is not None:
-        xst_text = build_circle(radius=args.circle, color=args.color)
+        xst_text = build_circle(radius=args.circle, color=args.color, tilt=args.tilt)
     elif args.preset:
         try:
             xst_text = paint(args.preset, color=args.color)
@@ -707,7 +742,7 @@ def main():
             xst_text = build_profile_stroke(
                 waypoints, size=args.size, pprofile=args.pprofile,
                 wprofile=args.wprofile, sprofile=args.sprofile,
-                segments=args.segments, closed=args.closed, color=args.color)
+                segments=args.segments, closed=args.closed, color=args.color, tilt=args.tilt)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(2)
@@ -726,7 +761,8 @@ def main():
                     blocks.append(build_circle(
                         cx=desc.get("cx", 0.0), cy=desc.get("cy", 0.0),
                         radius=desc.get("radius", 1.0), size=desc.get("size", 6.0),
-                        wetness=desc.get("wetness", 0.5), scratch=desc.get("scratch", 0.5)))
+                        wetness=desc.get("wetness", 0.5), scratch=desc.get("scratch", 0.5),
+                        color=desc.get("color"), tilt=desc.get("tilt", 0.0)))
                 elif t == "profile":
                     wps = [tuple(float(v) for v in wp) for wp in desc["waypoints"]]
                     wps = [(x, y, 0.5) for (x, y) in wps]
@@ -736,7 +772,8 @@ def main():
                         wprofile=desc.get("wprofile", "Level 5 — Medium"),
                         sprofile=desc.get("sprofile", "None"),
                         segments=desc.get("segments", 16),
-                        closed=desc.get("closed", False)))
+                        closed=desc.get("closed", False),
+                        color=desc.get("color"), tilt=desc.get("tilt", 0.0)))
                 elif t == "raw":
                     blocks.append(desc["xst"])
                 else:
