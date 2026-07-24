@@ -29,15 +29,15 @@ s -2.4 -2.7 0.0 -33 -28 0 0.15  # next frame
 ### `s` — Stroke frame (defines one brush posture)
 
 ```
-s <x> <y> <z> <Tilt-Y> <Tilt-X> <Barrel-Rotation> <Pressure>
+s <x> <y> <z> <Pitch> <Roll> <Turn> <Pressure>
 ```
 
 | Param | Meaning | Notes |
 |-------|---------|-------|
 | `x` `y` `z` | Position of the brush tuft base in 3D | Normalized canvas units, typically `[-3, 3]` for x/y, `[-0.5, 0.5]` for z |
-| `Tilt-Y` | Brush tilt in degrees, around the Y axis | Positive points North |
-| `Tilt-X` | Brush tilt in degrees, around the X axis | Positive points West |
-| `Barrel-Rotation` | Brush roll around its own axis, degrees | Usually 0 |
+| `Pitch` | Brush tilt around the axis pointing away from the viewer | ~0 = brush held near-vertical; larger = leaning back/forward |
+| `Roll` | **Sideways splay** — rotation that lays the tuft flat | THIS is what spreads the tuft across the stroke. A gradient stroke uses Roll ≈ −44 (leaning toward 3 o'clock) so the node-0→node-8 color gradient shows across the WIDTH. Verified against a real recorded stroke. |
+| `Turn` | Brush roll around its own axis | Usually 0 |
 | `Pressure` | How hard the brush is pressed | Range `[0, 1]`, where 0 = no contact, 1 = max |
 
 A *stroke* is a series of `s` lines with gradually changing x, y, and pressure
@@ -157,13 +157,25 @@ let the helper compute z for you.
 
 ## Tilts and barrel rotation
 
-- `Tilt-Y`: rotation around the Y axis. Positive tilts the brush so the tip points North (toward the back of the canvas from the user's POV). A brush held vertically has Tilt-Y close to 0; a brush laid flat with the tip pointing away from the user has Tilt-Y close to 90.
-- `Tilt-X`: rotation around the X axis. Positive tilts the brush so the tip points West (left). A brush held with the tip pointing left has Tilt-X close to 90.
-- `Barrel-Rotation`: roll of the brush around its own axis. Usually 0, but useful for watercolors where rotating the brush mid-stroke adds variation.
+The `s` frame's orientation fields are **Pitch, Roll, Turn** (not "Tilt-Y/Tilt-X/Barrel-Rotation" — that was a misreading). The brush TUFT is splayed in **2D** so the 9-node color gradient fans across the paper:
 
-From the spec, a "vertical-ish" brush posture in the example stroke is
-`Tilt-Y: -33, Tilt-X: -28` — meaning the brush is leaning back and to the
-right of vertical.
+- `Pitch`: rotation around the axis pointing away from the viewer. ~0 = brush near-vertical; **Pitch > 0 → tuft points North (toward you); Pitch < 0 → South.**
+- `Roll`: rotation around the vertical axis. **Roll > 0 → tuft points West; Roll < 0 → East.** This is the primary splay axis for a side-on gradient.
+- `Turn`: roll of the brush around its own axis. Usually 0.
+
+The **splay magnitude** (`|Roll| + |Pitch|`) controls how much of the root (node-8) color shows: a bigger splay lays the tuft flatter, exposing more of the bristle base.
+
+Verified against two recorded samples:
+
+| Sample | Direction | `s x y z Pitch Roll Turn` |
+|--------|-----------|---------------------------|
+| 4-direction dabs | East  | `… 1 -54 0`  → Roll=−54 |
+| 4-direction dabs | North | `… 57 3 0`   → Pitch=+57 |
+| 4-direction dabs | West  | `… 0 72 0`   → Roll=+72 |
+| 4-direction dabs | South | `… -67 -2 0` → Pitch=−67 |
+| tilt+rotate ring | lean 3 o'clock | `… 1 -44 0` → Roll=−44 |
+
+So the canonical mapping is: **East = Roll(−), West = Roll(+), North = Pitch(+), South = Pitch(−).**
 
 ## Source
 

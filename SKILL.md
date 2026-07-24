@@ -147,9 +147,10 @@ Expresii uses a normalized 3D coordinate system centered on the canvas. From the
    bookends (open = lead+trail lift, closed loop = leading lift only).
 5. **Set the brush color** (optional). Expresii loads color per brush NODE
    (0=tip .. 8=root). The 9 node colors form a gradient **along the brush tuft**;
-   to paint that gradient **across the stroke width** you tilt the brush
-   (Tilt-Y in the `s` frames) so the tuft lies sideways. The helper does this
-   for you:
+   to paint that gradient **across the stroke width** you splay the brush via
+   **Roll** (the `s`-frame field that lays the tuft flat sideways; verified
+   against a recorded stroke where Roll ≈ −44, Pitch ≈ 1). The helper does
+   this for you:
    - **Solid color** — `paint("dry_brush_line", color="Vermilion")` or
      `--preset dry_brush_line --color Vermilion`. Also accepts `"r,g,b"`,
      `"#rrggbb"`, or a `COLOR_PROFILES` name (Indigo, Cobalt, SapGreen,
@@ -159,8 +160,12 @@ Expresii uses a normalized 3D coordinate system centered on the canvas. From the
      `"Cobalt:Vermilion"`) or a `COLOR_RAMP_PROFILES` name (WarmToCool,
      CoolToWarm, LightToDark, HueCycle). The helper sets node 0 = tip color,
      node 8 = root color, interpolated between — a gradient across the tuft.
-     A gradient **auto-tilts the brush 45°** so the gradient shows across the
-     stroke; override with `--tilt DEG` (set 0 for a flat, lengthwise tuft).
+     A gradient **auto-splays the tuft via Roll ≈ −44°** so the gradient
+     shows across the stroke width. The splay is genuinely **2D**:
+     `tilt` accepts `E`/`W`/`N`/`S` (cardinal; Roll=East/West, Pitch=North/South,
+     verified against a recorded 4-direction dab sample), a scalar (Roll only),
+     or an explicit `(roll, pitch)` tuple. `--tilt DEG` sets the splay magnitude
+     (set 0 for a flat, lengthwise tuft).
    - **Default** is white-to-grey if you pass no color.
 6. **Use the stroke library** (optional, saves re-deriving params). The helper
    ships `STROKE_LIBRARY` presets you can call by name:
@@ -168,6 +173,12 @@ Expresii uses a normalized 3D coordinate system centered on the canvas. From the
    `bold_dot`. Build one with `paint(name, color=...)` (Python) or
    `--preset NAME [--color SPEC]` (CLI). Each preset bundles path + profiles;
    override any field (size, profiles, waypoints) via `paint(name, **overrides)`.
+7. **Make dabs (pressed splats).** `build_dab(pos, direction, tilt_deg, color)`
+   emits a single `b`-sandwiched pressed dab — the primitive behind the
+   recorded 4-direction tilt sample. `direction` is `E`/`W`/`N`/`S` (or a
+   `(roll, pitch)` tuple / scalar). The tuft splays that way, so the tip→root
+   gradient fans across the paper; a larger `tilt_deg` shows MORE of the root
+   color (a flatter tuft). Combine several with `build_composite`.
 7. **Build the stroke frames.** Each `s` line is one brush posture; consecutive frames with changing x/y/pressure form a continuous stroke. Pressure usually ramps: 0 → peak → 0 over the stroke length. For multiple disconnected strokes, add a frame with pressure 0 (lift) before starting the next.
 8. **Send via the helper.** Either write the XST to a temp file and pass it to the helper, or use `--command` / `--stroke` / `--pstroke` / `--preset` / `--circle` / `--composite` flags. Read the result — `OK  sent N chars` on success, `FAIL  no_response` if the server didn't reply.
 9. **Iterate.** If the stroke looks wrong (Expresii shows a stroke-recorder window), adjust waypoints, pressure profile, color, or brush params and re-send. Use `c` to clear the canvas between attempts.
@@ -176,7 +187,12 @@ Expresii uses a normalized 3D coordinate system centered on the canvas. From the
 
 - **`c` clears the entire canvas.** Only send it when you actually want a clean slate. For multi-stroke paintings, send `c` once at the start, not between strokes.
 - **Pressure 0 still draws** if the brush is touching the canvas. To "lift" the brush between disconnected strokes, you usually need a frame with pressure 0 *and* a small z-shift (lift the brush up). The `s` z parameter is your friend.
-- **Tilts are in degrees, not radians.** Range typically `[-90, 90]`. A flat brush has tilt (0, 0). A brush held vertical from the side has tilt like (-33, -28) — see the example in the upstream spec.
+- **Tilts are 2D and in degrees, not radians.** The `s` frame is
+  `s x y z Pitch Roll Turn Pressure`. Roll = East(−)/West(+), Pitch = North(+)/South(−).
+  A flat brush is (0, 0). A tuft splayed toward 3 o'clock (East) is roughly
+  (Roll −54, Pitch 0); toward you (North) is (0, +57). **Magnitude matters:**
+  a bigger splay shows more of the root (node-8) color, which is how a tuft
+  gradient paints across the paper. Verified against recorded samples.
 - **Multipart form, not raw POST.** Sending the XST as the request body with `Content-Type: text/plain` will not work. It must be a `multipart/form-data` form with a field named `message`. The helper handles this; do not roll your own `curl -d @file` shortcut.
 - **No auth in the protocol.** Anyone on the local network who can reach port 9000 can drive the brush. If you're on a shared network, treat that as a risk.
 - **The server returns 200 on success even for invalid commands.** If your XST is malformed, the canvas just won't change. Verify by checking the stroke-recorder window in Expresii.

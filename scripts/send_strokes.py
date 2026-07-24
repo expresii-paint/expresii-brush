@@ -91,10 +91,53 @@ def send_xst(host: str, port: int, xst_text: str, timeout: float = 10.0,
         return {"ok": False, "status": "no_response", "error": str(e)}
 
 
+# ── Brush tilt (2D orientation) ─────────────────────────────────────────────
+# A real recorded stroke (see references/xst-format.md) uses the `s` frame
+# fields `s <x> <y> <z> <Pitch> <Roll> <Turn> <Pressure>`. The brush TUFT is
+# splashed sideways (so the 9-node color gradient paints across the stroke
+# WIDTH) by combininng ROLL and PITCH:
+#   Roll  > 0 -> tuft points West ;  Roll  < 0 -> East
+#   Pitch > 0 -> tuft points North;  Pitch < 0 -> South
+# The splay MAGNITUDE (|roll|+|pitch|) controls how much of the root color
+# shows. We express tilt as (roll, pitch).
+CARDINAL = {
+    # (roll, pitch) — verified against the recorded 4-direction dab sample:
+    #   East  -> Roll=-54   North -> Pitch=+57
+    #   West  -> Roll=+72   South -> Pitch=-67
+    "E": (-54.0, 0.0), "East": (-54.0, 0.0),
+    "W": (72.0, 0.0),  "West": (72.0, 0.0),
+    "N": (0.0, 57.0),  "North": (0.0, 57.0),
+    "S": (0.0, -67.0), "South": (0.0, -67.0),
+}
+_AUTOTILT = (-44.0, 0.0)  # default splay (Roll) for a gradient stroke
+
+
+def _resolve_tilt(tilt):
+    """Normalize a tilt argument to (roll, pitch).
+
+    Accepts:
+      - None / 0.0           -> (0.0, 0.0)  (no splay; tip-only contact)
+      - scalar (float/int)   -> (0.0, scalar)  == Roll only (back-compat)
+      - (roll, pitch) tuple  -> as-is
+      - "E"/"W"/"N"/"S"       -> CARDINAL direction tuple
+    """
+    if tilt is None:
+        return (0.0, 0.0)
+    if isinstance(tilt, str):
+        if tilt not in CARDINAL:
+            raise ValueError(f"unknown tilt direction {tilt!r}; use one of {list(CARDINAL)}")
+        return CARDINAL[tilt]
+    if isinstance(tilt, (int, float)):
+        return (0.0, float(tilt))
+    if isinstance(tilt, (tuple, list)) and len(tilt) == 2:
+        return (float(tilt[0]), float(tilt[1]))
+    raise ValueError(f"bad tilt {tilt!r}: expected scalar, (roll,pitch), or cardinal name")
+
+
 def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
                 size: float = 6.0, wetness: float = 0.5, scratch: float = 0.5,
                 n_frames: int = 96, pressure_plateau: float = 0.75,
-                clear_first: bool = True, color=None, tilt: float = 0.0) -> str:
+                clear_first: bool = True, color=None, tilt=0.0) -> str:
     """
     Build a closed circle XST. Returns a ready-to-send stroke string.
 
@@ -114,16 +157,17 @@ def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
         lines.append("c")
     lines += [f"B {size:.5f}", f"w {wetness:.5f}"]
     # Color: set the brush NODES (0..8, tip->root). A tuft gradient (tip!=root)
-    # paints a color transition across the brush; with Tilt-Y (see s frames)
+    # paints a color transition across the brush; with a 2D tilt (see s frames)
     # the tuft lies sideways so the gradient shows across the stroke WIDTH.
+    roll, pitch = _resolve_tilt(tilt)
     cres = _resolve_color(color)
     if cres is not None:
         kind, *cargs = cres
         if kind == "gradient":
             for line in _color_l_gradient(*cargs):
                 lines.append(line)
-            if tilt == 0.0:
-                tilt = 45.0  # default tilt so a tuft gradient is visible
+            if roll == 0.0 and pitch == 0.0:
+                roll, pitch = _AUTOTILT  # splay the tuft sideways so the gradient shows
         else:
             for line in _color_l_all_nodes(cargs[0]):
                 lines.append(line)
@@ -139,7 +183,7 @@ def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
 
     a0 = -seam_pad
     lines.append(f"s {cx + radius*math.cos(a0):.5f} {cy + radius*math.sin(a0):.5f} "
-                 f"0.06250 {tilt:.5f} 0 0 0.00000")
+                 f"0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
 
     # Real frames: from -pad through 2pi+pad (overlapping the seam).
     n_total = n_frames + 2
@@ -156,7 +200,8 @@ def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
         else:
             p = pressure_plateau
         z = 0.0625 - 0.125 * p
-        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {tilt:.5f} 0 0 {p:.5f}")
+        # s <x> <y> <z> <Pitch> <Roll> <Turn> <Pressure>
+        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
 
     return "\n".join(lines) + "\n"
 
@@ -248,9 +293,10 @@ SCRATCH_PROFILES = {  # values 0..1
 
 # ---------------------------------------------------------------------------
 # Color
-# Expresii sets brush color with `l <node> R G B A` (each 0..255). The color is
-# brush-global: it applies to subsequent strokes until changed. We expose named
-# fixed colors plus color-RAMP profiles (HSL endpoints interpolated along the
+# Expresii sets brush color with `l <node> R G B` (each 0..255, NO alpha). The
+# color is brush-global: it applies to subsequent strokes until changed. We
+# expose named fixed colors plus color-RAMP profiles (HSL endpoints interpolated
+# along the
 # stroke) for gradients. `parse_color` also accepts "r,g,b" or "#rrggbb".
 # ---------------------------------------------------------------------------
 COLOR_PROFILES = {  # fixed RGB (0..255)
@@ -326,23 +372,24 @@ def _lerp_rgb(a, b, f):
     return tuple(int(round(a[i] + (b[i] - a[i]) * f)) for i in range(3))
 
 
-def _color_l_command(rgb, alpha: int = 255, node: int = 0) -> str:
+def _color_l_command(rgb, node: int = 0) -> str:
     r, g, b = (max(0, min(255, int(round(v)))) for v in rgb)
-    return f"l {node} {r} {g} {b} {alpha}"
+    return f"l {node} {r} {g} {b}"
 
 
-def _color_l_all_nodes(rgb, alpha: int = 255) -> list:
+def _color_l_all_nodes(rgb) -> list:
     """Expresii loads color per brush NODE (0..8, tip->root). Set all 9 so the
     whole brush carries the same color (a single l 0 leaves the rest default)."""
-    return [_color_l_command(rgb, alpha, node) for node in range(9)]
+    return [_color_l_command(rgb, node) for node in range(9)]
 
 
-def _color_l_gradient(rgb_tip, rgb_root, alpha: int = 255) -> list:
+def _color_l_gradient(rgb_tip, rgb_root) -> list:
     """Set a color GRADIENT across the brush tuft: node 0 (tip) = rgb_tip,
     node 8 (root) = rgb_root, linearly interpolated between. Tilting the brush
-    (Tilt-Y/X in the `s` frames) lays the tuft sideways so this gradient paints
-    across the stroke WIDTH. Flat (no tilt) shows it only along the tuft length."""
-    return [_color_l_command(_lerp_rgb(rgb_tip, rgb_root, i / 8), alpha, i)
+    (Roll/Pitch in the `s` frames) lays the tuft sideways so this gradient
+    paints across the stroke WIDTH. Flat (no tilt) shows it only along the
+    tuft length."""
+    return [_color_l_command(_lerp_rgb(rgb_tip, rgb_root, i / 8), i)
             for i in range(9)]
 
 
@@ -460,7 +507,7 @@ def _interp(pts: list, t: float) -> float:
 def build_profile_stroke(waypoints: list, size: float = 6.0,
                          pprofile: str = "Standard", wprofile: str = "Level 5 — Medium",
                          sprofile: str = "None", segments: int = 16,
-                         closed: bool = False, color=None, tilt: float = 0.0) -> str:
+                         closed: bool = False, color=None, tilt=0.0) -> str:
     """
     Build an XST stroke using named pressure/wetness/scratch profiles.
 
@@ -515,25 +562,26 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     lines = ["# Generated by expresii-brush (profile stroke)", f"B {size:.5f}"]
 
     # Color: set the brush NODES (0..8, tip->root). A tuft gradient paints a
-    # transition across the brush; with Tilt-Y the tuft lies sideways so the
+    # transition across the brush; with a 2D tilt the tuft lies sideways so the
     # gradient shows across the stroke WIDTH. Set ONCE here (brush-global),
     # not per path-segment — the tuft gradient is a brush property, not a
     # path-position property.
+    roll, pitch = _resolve_tilt(tilt)
     cres = _resolve_color(color)
     if cres is not None:
         kind, *cargs = cres
         if kind == "gradient":
             for line in _color_l_gradient(*cargs):
                 lines.append(line)
-            if tilt == 0.0:
-                tilt = 45.0
+            if roll == 0.0 and pitch == 0.0:
+                roll, pitch = _AUTOTILT  # splay the tuft sideways so the gradient shows
         else:
             for line in _color_l_all_nodes(cargs[0]):
                 lines.append(line)
 
     # leading lift bookend (brush down) at first waypoint
     x0, y0, _ = waypoints[0]
-    lines.append(f"s {x0:.5f} {y0:.5f} 0.06250 {tilt:.5f} 0 0 0.00000")
+    lines.append(f"s {x0:.5f} {y0:.5f} 0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
 
     seg = max(1, segments)
     # one continuous stroke: emit an `s` frame at EVERY segment boundary so the
@@ -549,11 +597,104 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
         # re-issue wetness/scratch so it tracks the profile (brush stays down)
         lines.append(f"w {wlvl / 12:.5f}")
         lines.append(f"i {sval:.5f}")
-        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {tilt:.5f} 0 0 {p:.5f}")
+        # s <x> <y> <z> <Pitch> <Roll> <Turn> <Pressure>
+        # The 2D tilt (roll, pitch) splays the tuft sideways so the node
+        # gradient shows across the stroke WIDTH (see references/xst-format.md).
+        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
 
     if not closed:
         x1, y1, _ = waypoints[-1]
         lines.append(f"s {x1:.5f} {y1:.5f} 0.06250 0 0 0 0.00000")
+    return "\n".join(lines) + "\n"
+
+
+
+def build_dab(pos, direction="E", tilt_deg: float = 54.0, color="Cobalt:Vermilion",
+              size: float = 6.0, wetness: float = 0.3, scratch: float = 0.1,
+              pressure: float = 0.75) -> str:
+    """
+    Build a single pressed dab — the primitive behind the user's 4-direction
+    tilt sample. A dab is the simplest expressive mark: the brush is lowered
+    onto one spot and splayed in a direction so the 9-node tuft gradient shows
+    across the paper.
+
+    The dab is emitted as a `b`-sandwiched block (matching a real recorded
+    stroke):
+        b ...            # brush pen-down marker
+        s x y z P R T 0  # pressed (z dips as pressure rises)
+        ... pressure pulse up to `pressure`, then back to 0 ...
+        s x y z P R T 0  # released
+        b ...            # brush pen-up marker
+
+    Parameters
+    ----------
+    pos       : (x, y) center of the dab in normalized canvas units.
+    direction : tilt DIRECTION. One of "E"/"W"/"N"/"S" (cardinal, see CARDINAL),
+                OR an explicit (roll, pitch) tuple, OR a scalar (Roll only).
+                The dab splays the tuft toward this direction so the
+                tip->root color gradient fans out that way.
+    tilt_deg  : splay MAGNITUDE in degrees. Larger = more of the root color
+                shows (the tuft lies flatter). Default 54 matches the sample's
+                East dab; the sample's West dab used 72 (more root/red).
+    color     : solid name/"r,g,b"/"#hex", or "tip:root" / ramp-profile for a
+                tuft gradient (tip = brush tip, root = bristle base).
+    size      : brush size (XST B).
+    wetness   : XST w (0..1).
+    scratch   : XST i (0..1).
+    pressure  : peak pressure of the dab (0..1); the frame pulses 0 -> peak -> 0.
+    """
+    x, y = pos
+    # Resolve direction -> (roll, pitch). Cardinal names already carry a
+    # sign; tilt_deg sets the overall splay magnitude.
+    if isinstance(direction, str):
+        base_r, base_p = CARDINAL[direction]
+        roll = math.copysign(tilt_deg, base_r) if base_r != 0.0 else 0.0
+        pitch = math.copysign(tilt_deg, base_p) if base_p != 0.0 else 0.0
+    else:
+        roll, pitch = _resolve_tilt(direction)
+        # honor tilt_deg as the overall magnitude for scalar/tuple direction
+        if roll == 0.0 and pitch == 0.0:
+            roll = -tilt_deg  # default East-ish splay
+        else:
+            mag = abs(roll) + abs(pitch)
+            roll = roll / mag * tilt_deg
+            pitch = pitch / mag * tilt_deg
+
+    lines = [f"B {size:.5f}", f"w {wetness:.5f}"]
+    cres = _resolve_color(color)
+    if cres is not None:
+        kind, *cargs = cres
+        if kind == "gradient":
+            for line in _color_l_gradient(*cargs):
+                lines.append(line)
+        else:
+            for line in _color_l_all_nodes(cargs[0]):
+                lines.append(line)
+    lines.append(f"i {scratch:.5f}")
+    # b marker (pen down) — 30 base values like the recorded sample
+    lines.append("b " + " ".join(f"{0.01:.5f}" if i in (0, 25) else "0.00000"
+                                  for i in range(30)))
+    # pen-down posture (lifted), then pressed frames with the splay
+    lines.append(f"s {x:.5f} {y:.5f} 0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
+    z0 = 0.0625
+    # pressure pulse: rise to peak, hold a few frames, fall to 0 (cosine-ish)
+    n_up = 8
+    for k in range(1, n_up + 1):
+        p = pressure * (0.5 - 0.5 * math.cos(math.pi * k / n_up))
+        z = z0 - 0.5 * p
+        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
+    n_hold = 4
+    for _ in range(n_hold):
+        z = z0 - 0.5 * pressure
+        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {pressure:.5f}")
+    for k in range(n_up, -1, -1):
+        p = pressure * (0.5 - 0.5 * math.cos(math.pi * k / n_up))
+        z = z0 - 0.5 * p
+        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
+    # pen-up posture (lifted)
+    lines.append(f"s {x:.5f} {y:.5f} 0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
+    lines.append("b " + " ".join(f"{0.01:.5f}" if i in (0, 25) else "0.00000"
+                                  for i in range(30)))
     return "\n".join(lines) + "\n"
 
 
