@@ -91,6 +91,22 @@ Setting `z = 0` with non-zero pressure produces a thin, barely-visible stroke �
 
 To lift the brush between disconnected strokes, set `pressure = 0` and `z = 0.0625` (which is what the formula gives you for free — no need to compute it).
 
+### Bookend frames (brush up/down events)
+
+Expresii registers a stroke only when the brush transitions **lifted → contact → lifted**. For an **open** stroke (a line, a curve, anything that doesn't loop back to its start), bracket it with two bookend `s` frames:
+
+```text
+# brush DOWN (lifted) at the start point
+s <x0> <y0> 0.06250 0 0 0 0.00000
+# ... real stroke frames at pressure 0.5–0.8 ...
+# brush UP (lifted) at the end point
+s <x1> <y1> 0.06250 0 0 0 0.00000
+```
+
+**Closed loops are different.** For a circle/ring, do NOT add a trailing lift bookend — the loop's last contact frame already meets the first at the seam with pressure on both sides, so it closes continuously. A trailing lift raises the brush exactly at the join and opens a **visible gap**. Use only a leading (brush-down) bookend for closed loops. (This is why `build_circle()` emits a leading bookend and no trailing one; `build_stroke_command()` emits both, for open strokes.)
+
+Without the leading bookend the brush never touches the paper and **the canvas stays blank** even though the POST returns HTTP 200. This is the single most common cause of "I sent it but nothing drew." The helper emits the right bookends automatically — if you hand-write XST, follow the rules above.
+
 ### The /confirm-ajax endpoint
 
 ```
@@ -117,10 +133,22 @@ Expresii uses a normalized 3D coordinate system centered on the canvas. From the
    - `B` (size): start at 4. Bigger = bolder, smaller = finer detail.
    - `w` (wetness): 0.3–0.5 for inky, dry-ish strokes; 0.8–1.0 for watery washes.
    - `i` (scratchiness): 0 for smooth; 0.5+ for dry-brush, textured strokes.
-4. **Optionally set the brush color** with one `l` command per node (0–8). Default is white-to-grey. See the example in the upstream spec for the format.
-5. **Build the stroke frames.** Each `s` line is one brush posture; consecutive frames with changing x/y/pressure form a continuous stroke. Pressure usually ramps: 0 → peak → 0 over the stroke length. For multiple disconnected strokes, add a frame with pressure 0 (lift) before starting the next.
-6. **Send via the helper.** Either write the XST to a temp file and pass it to the helper, or use `--command` / `--stroke` flags. Read the result — `OK  sent N chars` on success, `FAIL  no_response` if the server didn't reply.
-7. **Iterate.** If the stroke looks wrong (Expresii shows a stroke-recorder window), adjust waypoints, pressure profile, or brush params and re-send. Use `c` to clear the canvas between attempts.
+   - **Or use named profiles** — the helper ships the Amami Inker pressure /
+     wetness / scratch profiles. See `references/pressure-profiles.md` for the
+     full catalog and recipes (e.g. "dry brush, scratchy ends" = Standard
+     pressure + Level 1 Driest + Build Up scratch). Use `--pstroke x,y`
+     (repeatable) with `--pprofile / --wprofile / --sprofile`.
+4. **Multiple strokes in one canvas** — use `build_composite([...])` (Python) or
+   the `--composite SPEC.json` CLI flag. The spec is a JSON array of stroke
+   descriptors: `{"type":"circle","cy":1.4}` or
+   `{"type":"profile","waypoints":[[-1.5,0],[1.5,0]],"pprofile":"Standard",
+   "wprofile":"Level 1 — Driest","sprofile":"Build Up"}`. `build_composite()`
+   prepends a single `c` (clear) and joins the blocks; each block keeps its own
+   bookends (open = lead+trail lift, closed loop = leading lift only).
+5. **Optionally set the brush color** with one `l` command per node (0–8). Default is white-to-grey. See the example in the upstream spec for the format.
+6. **Build the stroke frames.** Each `s` line is one brush posture; consecutive frames with changing x/y/pressure form a continuous stroke. Pressure usually ramps: 0 → peak → 0 over the stroke length. For multiple disconnected strokes, add a frame with pressure 0 (lift) before starting the next.
+7. **Send via the helper.** Either write the XST to a temp file and pass it to the helper, or use `--command` / `--stroke` / `--pstroke` / `--composite` flags. Read the result — `OK  sent N chars` on success, `FAIL  no_response` if the server didn't reply.
+8. **Iterate.** If the stroke looks wrong (Expresii shows a stroke-recorder window), adjust waypoints, pressure profile, or brush params and re-send. Use `c` to clear the canvas between attempts.
 
 ## Pitfalls
 
@@ -136,8 +164,8 @@ Expresii uses a normalized 3D coordinate system centered on the canvas. From the
 
 After sending, the helper exits 0 on success and prints `OK  sent N chars to <host>:<port> (HTTP <code>)`. To verify the stroke actually rendered:
 
-- Check the Expresii stroke-recorder window (it pops up when strokes are being received)
-- Look at the canvas in Expresii directly
-- For automated tests, count the frames in your XST and confirm `sent_chars` matches what you expected to send
+- **Authoritative:** look at the Expresii canvas/window directly (or have the user screenshot it).
+- **Self-verify (reliable):** pass `--verify OUT.png`. The helper mirrors the official Command Console client: it POSTs `message` (+ `maxWidth`/`maxHeight` placeholder fields, for wire-format parity) to `/confirm-ajax`, then polls `GET /result/<id>` every ~0.9s and saves the frame only once the server reports `status == "done"` (carrying the final `imageBase64`). The reliable result comes from waiting for `done` — that's why the client "always returns the correct image" instead of grabbing a first-served (possibly previous/stale) frame. The captured frame is THIS render. If it still fails, the authoritative check is the Expresii window. Tune with `--verify-retries N` / `--verify-wait S`.
+- For automated tests, count the frames in your XST and confirm `sent_chars` matches what you expected to send.
 
 See `EXAMPLES.md` for complete worked examples (single ink wash stroke, calligraphy curve, multi-color flower, clearing the canvas, error recovery).
