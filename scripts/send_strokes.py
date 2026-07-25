@@ -687,7 +687,7 @@ def _star_header(size: float = 6.0, wetness: float = 0.09,
 
 def build_star(cx: float = 0.0, cy: float = 0.0, outer: float = 3.2,
                inner: float = 2.7, points: int = 5, rainbow: bool = True,
-               size: float = 6.0, tilt_deg: float = 35.0,
+               size: float = 6.0,
                pprofile: str = None, wprofile: str = None,
                sprofile: str = None) -> str:
     """
