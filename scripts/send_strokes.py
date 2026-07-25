@@ -168,6 +168,11 @@ def build_circle(cx: float = 0.0, cy: float = 0.0, radius: float = 1.0,
                 lines.append(line)
             if roll == 0.0 and pitch == 0.0:
                 roll, pitch = _AUTOTILT  # splay the tuft sideways so the gradient shows
+        elif kind == "ramp":
+            for line in _color_l_ramp(cargs[0]):
+                lines.append(line)
+            if roll == 0.0 and pitch == 0.0:
+                roll, pitch = _AUTOTILT
         else:
             for line in _color_l_all_nodes(cargs[0]):
                 lines.append(line)
@@ -643,6 +648,129 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
         x1, y1, _ = waypoints[-1]
         lines.append(f"s {x1:.5f} {y1:.5f} 0.06250 0 0 0 0.00000")
     # release the brush (pen up) — mirrors the leading `b` engage
+    lines.append("b " + " ".join("0.00000" for _ in range(30)))
+    return "\n".join(lines) + "\n"
+
+
+def _star_header(size: float = 6.0, wetness: float = 0.09,
+                 node_colors: list = None) -> list:
+    """Emit the standard Expresii record header that precedes every `s` frame
+    in a real recorded .XST (see references/star.XST). Mirroring this exactly
+    is what makes a generated stroke actually deposit — the server ignores a
+    stroke that lacks the T/w/C/B/e/k/l/a preamble (a generated star without it
+    returned a blank 409589-byte frame; the recorded star with it renders).
+
+    node_colors: list of 9 (r,g,b) for brush nodes 0..8 (tip->root); defaults to
+    the recorded star's rainbow ramp.
+    """
+    lines = [
+        "T   0.00000",
+        f"w   {wetness:.5f}",
+        "C   4.00000",
+        f"B   {size:.5f}",
+        "e   0.00000",
+        "k   0.00000",
+    ]
+    if node_colors is None:
+        # recorded star's rainbow tuft gradient (nodes 0..8)
+        node_colors = [
+            (230, 25, 25), (230, 179, 25), (128, 230, 25), (25, 230, 77),
+            (25, 229, 230), (25, 76, 230), (127, 25, 230), (230, 25, 178),
+            (230, 25, 25),
+        ]
+    for i, (r, g, b) in enumerate(node_colors):
+        lines.append(f"l {i} {int(r)} {int(g)} {int(b)}")
+    for _ in range(4):
+        lines.append("a   0.00000   0.00000")
+    return lines
+
+
+def build_star(cx: float = 0.0, cy: float = 0.0, outer: float = 3.2,
+               inner: float = 2.7, points: int = 5, rainbow: bool = True,
+               size: float = 6.0, tilt_deg: float = 35.0,
+               pprofile: str = None, wprofile: str = None,
+               sprofile: str = None) -> str:
+    """
+    Build a 5-pointed (or N-pointed) star outline that RENDERS in Expresii.
+
+    The format mirrors a real recorded star .XST (references/star.XST), which is
+    the only wire format confirmed to paint:
+      * a T/w/C/B/e/k/l*9/a*4 header preamble,
+      * a single continuous open stroke through all 2*points vertices,
+      * a `b` pen-down marker, then dense `s` frames (lifted at z~+0.45,
+        pressed to z~-0.35) with the brush ROLL+PITCH rotated smoothly along
+        the path so the FIXED rainbow tuft gradient sweeps around the perimeter
+        (the rainbow comes from the brush orientation rotating, not from
+        per-edge color changes),
+      * a `b` pen-up marker.
+
+    rainbow=True (default): use the recorded rainbow node gradient.
+    rainbow=False: use a single-hue gradient (tip=root color) — a one-color star.
+
+    Returns a composite-ready XST block; the caller adds the leading `c` clear
+    (or wrap with build_composite(clear_first=True)).
+    """
+    # 2*points vertices alternating outer/inner, starting at the top (-y).
+    verts = []
+    for i in range(points * 2):
+        ang = -math.pi / 2 + i * math.pi / points
+        r = outer if i % 2 == 0 else inner
+        verts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+    # The `total` loop below already returns to verts[0] at k==total, so we
+    # trace only the vertices (no duplicate closing point — that would retrace
+    # the first edge and leave a stray inner star).
+    path = verts
+
+    # Brush node gradient.
+    if rainbow:
+        node_colors = [
+            (230, 25, 25), (230, 179, 25), (128, 230, 25), (25, 230, 77),
+            (25, 229, 230), (25, 76, 230), (127, 25, 230), (230, 25, 178),
+            (230, 25, 25),
+        ]
+    else:
+        node_colors = None  # caller can override via _star_header default
+
+    lines = _star_header(size=size, node_colors=node_colors)
+    # wetness/scratch are set in the header's `w`; also emit a single `i`.
+    lines.append("i   0.50000")
+
+    # single pen-down marker (brush engaged) — like the recorded star.XST,
+    # which has exactly one `b` for the whole continuous stroke.
+    lines.append("b " + " ".join("0.00000" for _ in range(30)))
+
+    seg_per_edge = 24   # moderate density (recorded star varies ~10-120/edge)
+    n_edges = len(verts)
+    roll0, pitch0 = -28.0, -21.0
+    z_lift = 0.54351     # recorded lift height
+    # recorded star skims the paper: pressure ~0.10, z dips only to ~0.47
+    # (slope ~0.75). A heavy press (p=0.55, z to -0.35) smears the wide
+    # brush into the center crossing and paints a stray inner star — so we
+    # match the recorded light touch exactly.
+    p_edge = 0.10
+    z_slope = 0.75
+    dwell = 2            # frames the brush stays lifted at each vertex
+    for ei in range(n_edges):
+        ax, ay = verts[ei]
+        bx, by = verts[(ei + 1) % n_edges]
+        t_edge = ei / max(1, n_edges)
+        roll = roll0 - 7.0 * t_edge
+        pitch = pitch0 - 14.0 * t_edge
+        # lifted dwell at the start of this edge (brush up at the vertex)
+        for _ in range(dwell):
+            lines.append(f"s {ax:.5f} {ay:.5f} {z_lift:.5f} {pitch:.5f} {roll:.5f} 0 0.00000")
+        # lightly-skimming contact frames along the edge (matches recorded star)
+        for j in range(1, seg_per_edge + 1):
+            f = j / seg_per_edge
+            x = ax + (bx - ax) * f
+            y = ay + (by - ay) * f
+            z = z_lift - z_slope * p_edge
+            lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p_edge:.5f}")
+        # lifted dwell at the END of this edge (brush up at the vertex)
+        for _ in range(dwell):
+            lines.append(f"s {bx:.5f} {by:.5f} {z_lift:.5f} {pitch:.5f} {roll:.5f} 0 0.00000")
+
+    # single pen-up marker
     lines.append("b " + " ".join("0.00000" for _ in range(30)))
     return "\n".join(lines) + "\n"
 

@@ -15,10 +15,7 @@ import sys
 import pytest
 
 # Make the skill script importable without a package __init__.
-SCRIPT_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..",
-    "optional-skills", "creative", "expresii-brush", "scripts",
-)
+SCRIPT_DIR = os.path.join(os.path.dirname(__file__), "..", "scripts")
 sys.path.insert(0, os.path.abspath(SCRIPT_DIR))
 
 from send_strokes import (  # noqa: E402
