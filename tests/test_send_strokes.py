@@ -94,7 +94,10 @@ def test_build_up_scratch_ramps_zero_to_one():
 
 def _lifts(xst):
     sf = [l for l in xst.split("\n") if l.startswith("s ")]
-    return [l for l in sf if "0.06250" in l and "0.00000" in l]
+    # a lift = brush raised: z field (4th token, index 3) exactly 0.06250 and
+    # pressure (last token) 0.00000. Exact-field match avoids substring false
+    # positives from negative z like -0.06250.
+    return [l for l in sf if l.split()[3] == "0.06250" and l.split()[-1] == "0.00000"]
 
 
 def test_circle_is_closed_loop_leading_lift_only():
@@ -197,7 +200,8 @@ def test_hsl_to_rgb_pure_red():
 def test_resolve_color_routing():
     assert _resolve_color(None) is None
     assert _resolve_color("Vermilion") == ("solid", (210, 60, 30))
-    assert _resolve_color("WarmToCool")[0] == "gradient"
+    assert _resolve_color("WarmToCool")[0] == "ramp"
+    assert _resolve_color("HueCycle")[0] == "ramp"
     assert _resolve_color("Cobalt:Vermilion")[0] == "gradient"
     assert _resolve_color(("Cobalt", "Vermilion"))[0] == "gradient"
 
@@ -212,11 +216,22 @@ def test_color_gradient_sets_9_nodes_tip_to_root():
     assert g[4] == "l 4 105 60 40"  # midpoint lerp
 
 
-def test_color_all_nodes_emitted_for_solid():
-    lines = _color_l_all_nodes((10, 20, 30))
-    assert len(lines) == 9
-    assert lines[0] == "l 0 10 20 30"
-    assert lines[-1] == "l 8 10 20 30"
+def test_color_ramp_sweeps_full_hue_wheel():
+    # A multi-stop HSL ramp (e.g. HueCycle 0->180->360) must sweep the FULL
+    # wheel across the 9 tuft nodes, not collapse to a flat color. HueCycle's
+    # first and last stops are both hue 0 (==360), so naive first/last lerp
+    # would give a flat red; the ramp emitter interpolates every stop.
+    from send_strokes import _color_l_ramp, COLOR_RAMP_PROFILES
+    stops = [(t, h, s, l) for t, (h, s, l) in COLOR_RAMP_PROFILES["HueCycle"]]
+    nodes = _color_l_ramp(stops)
+    assert len(nodes) == 9
+    # all 9 node colors distinct -> a real rainbow, not flat
+    cols = {tuple(n.split()[1:]) for n in nodes}
+    assert len(cols) == 9, cols
+    # endpoints are red (hue 0 == 360); middle node is cyan (hue 180)
+    assert nodes[0] == "l 0 230 25 25"
+    assert nodes[8] == "l 8 230 25 25"
+    assert nodes[4] == "l 4 25 229 230"
 
 
 def test_gradient_stroke_emits_tuft_gradient_once_and_auto_tilts():

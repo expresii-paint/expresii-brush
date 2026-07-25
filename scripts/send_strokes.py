@@ -393,6 +393,32 @@ def _color_l_gradient(rgb_tip, rgb_root) -> list:
             for i in range(9)]
 
 
+def _color_l_ramp(hsl_stops) -> list:
+    """Set a multi-stop HSL RAMP across the tuft (nodes 0..8). Stops are
+    (t, h, s, l) with t in [0,1]. Hue is interpolated linearly (NOT
+    shortest-path) so a HueCycle 0->180->360 sweep actually traverses the full
+    wheel across the brush width — giving a rainbow rather than collapsing to
+    a flat color. Used for COLOR_RAMP_PROFILES names."""
+    stops = sorted(hsl_stops, key=lambda st: st[0])
+    out = []
+    for i in range(9):
+        t = i / 8
+        # find the segment [a, b] containing t
+        a, b = stops[0], stops[-1]
+        for j in range(len(stops) - 1):
+            if stops[j][0] <= t <= stops[j + 1][0]:
+                a, b = stops[j], stops[j + 1]
+                break
+        span = (b[0] - a[0]) or 1.0
+        f = (t - a[0]) / span
+        h = a[1] + (b[1] - a[1]) * f          # linear hue (full wheel)
+        s = a[2] + (b[2] - a[2]) * f
+        l = a[3] + (b[3] - a[3]) * f
+        rgb = _hsl_to_rgb(h % 360, s, l)
+        out.append(_color_l_command(rgb, i))
+    return out
+
+
 def _resolve_color(spec):
     """Resolve a color spec into one of:
       None                         -> leave default brush color
@@ -410,9 +436,10 @@ def _resolve_color(spec):
     if isinstance(spec, str):
         ramp = COLOR_RAMP_PROFILES.get(spec)
         if ramp is not None:
-            h0, s0, l0 = ramp[0][1]
-            h1, s1, l1 = ramp[-1][1]
-            return ("gradient", _hsl_to_rgb(h0, s0, l0), _hsl_to_rgb(h1, s1, l1))
+            # Multi-stop HSL ramp. Keep the stops so the emitter can sweep the
+            # full hue wheel across the tuft (first/last alone would collapse a
+            # HueCycle 0->360 to a flat color, since h0 == h360).
+            return ("ramp", [(_t, _h, _s, _l) for _t, (_h, _s, _l) in ramp])
         if ":" in spec:
             a, b = spec.split(":", 1)
             return ("gradient", parse_color(a), parse_color(b))
@@ -575,6 +602,11 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
                 lines.append(line)
             if roll == 0.0 and pitch == 0.0:
                 roll, pitch = _AUTOTILT  # splay the tuft sideways so the gradient shows
+        elif kind == "ramp":
+            for line in _color_l_ramp(cargs[0]):
+                lines.append(line)
+            if roll == 0.0 and pitch == 0.0:
+                roll, pitch = _AUTOTILT
         else:
             for line in _color_l_all_nodes(cargs[0]):
                 lines.append(line)
@@ -582,6 +614,11 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     # leading lift bookend (brush down) at first waypoint
     x0, y0, _ = waypoints[0]
     lines.append(f"s {x0:.5f} {y0:.5f} 0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
+    # engage the brush (pen down). Without a `b` marker Expresii treats the `s`
+    # frames as a move-without-paint and nothing is deposited — see the recorded
+    # sample, where every painted mark is wrapped in `b ... b`.
+    lines.append("b " + " ".join(f"{0.01:.5f}" if i in (0, 25) else "0.00000"
+                                  for i in range(30)))
 
     seg = max(1, segments)
     # one continuous stroke: emit an `s` frame at EVERY segment boundary so the
@@ -591,7 +628,7 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
         t = k / seg
         x, y = xy_at(t)
         p = _interp(pp, t)
-        z = 0.0625 - 0.125 * p
+        z = 0.0625 - 0.25 * p
         wlvl = _interp(wp, t)
         sval = _interp(sp, t)
         # re-issue wetness/scratch so it tracks the profile (brush stays down)
@@ -605,6 +642,8 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     if not closed:
         x1, y1, _ = waypoints[-1]
         lines.append(f"s {x1:.5f} {y1:.5f} 0.06250 0 0 0 0.00000")
+    # release the brush (pen up) — mirrors the leading `b` engage
+    lines.append("b " + " ".join("0.00000" for _ in range(30)))
     return "\n".join(lines) + "\n"
 
 
@@ -666,6 +705,9 @@ def build_dab(pos, direction="E", tilt_deg: float = 54.0, color="Cobalt:Vermilio
         kind, *cargs = cres
         if kind == "gradient":
             for line in _color_l_gradient(*cargs):
+                lines.append(line)
+        elif kind == "ramp":
+            for line in _color_l_ramp(cargs[0]):
                 lines.append(line)
         else:
             for line in _color_l_all_nodes(cargs[0]):
