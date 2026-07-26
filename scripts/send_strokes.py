@@ -25,6 +25,8 @@ import json
 import math
 import socket
 import sys
+import threading
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -48,9 +50,33 @@ def send_xst(host: str, port: int, xst_text: str, timeout: float = 10.0,
     (they don't actually change the render size) — they're included only to
     match the client wire format exactly. The reliable-result behavior comes
     from fetch_render() waiting for status == 'done', not from these fields.
+
+    CONCURRENCY (post-v2026.07.26 server): the server now has its
+    own inbound queue, but flooding it with parallel POSTs still risks the
+    old "wedged render" failure mode. To avoid that, ALL sends from this
+    process are serialized through a module-level lock (`_SEND_LOCK`) —
+    exactly like the console's client-side `isRendering`/`commandQueue`
+    gate that disables the "Send & Render" button while one command is
+    in flight. Callers that want to pipeline should enqueue their XST
+    strings and await each result in turn, never fire-and-forget.
+
     Returns a dict with 'ok', 'status', 'sent_chars', 'request_id', and
     optional 'error'.
     """
+    with _SEND_LOCK:
+        return _send_xst_unsafe(host, port, xst_text, timeout,
+                                 max_width, max_height)
+
+
+# Module-level client-side send lock: serializes every POST through this
+# process so we never send a new stroke command while one is still rendering
+# on the server. Mirrors the console's "Send & Render" button disabling
+# itself (isRendering flag) the moment a command is queued.
+_SEND_LOCK = threading.Lock()
+
+
+def _send_xst_unsafe(host: str, port: int, xst_text: str, timeout: float,
+                       max_width: int, max_height: int) -> dict:
     boundary = "----amamiBoundary" + str(hash(xst_text) & 0xFFFFFFFF)
     fields = [
         ("message", xst_text),
@@ -619,11 +645,10 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     # leading lift bookend (brush down) at first waypoint
     x0, y0, _ = waypoints[0]
     lines.append(f"s {x0:.5f} {y0:.5f} 0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
-    # engage the brush (pen down). Without a `b` marker Expresii treats the `s`
-    # frames as a move-without-paint and nothing is deposited — see the recorded
-    # sample, where every painted mark is wrapped in `b ... b`.
-    lines.append("b " + " ".join(f"{0.01:.5f}" if i in (0, 25) else "0.00000"
-                                  for i in range(30)))
+    # Expresii detects brush-down from two consecutive `s` frames going
+    # pressure 0 -> >0, with NO other command between them. So we emit NO `b`
+    # marker here; the loop's first press frame (p>0) right after this lift
+    # frame is what registers contact. (A `b` between them breaks the mark.)
 
     seg = max(1, segments)
     # one continuous stroke: emit an `s` frame at EVERY segment boundary so the
@@ -647,13 +672,14 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     if not closed:
         x1, y1, _ = waypoints[-1]
         lines.append(f"s {x1:.5f} {y1:.5f} 0.06250 0 0 0 0.00000")
-    # release the brush (pen up) — mirrors the leading `b` engage
-    lines.append("b " + " ".join("0.00000" for _ in range(30)))
+    # No trailing `b`: brush-up is the last press frame (p>0) immediately
+    # followed by the lifted frame above (p=0) — a consecutive s >0->0 pair,
+    # which is how Expresii detects pen-up. A `b` here would obstruct it.
     return "\n".join(lines) + "\n"
 
 
 def _star_header(size: float = 6.0, wetness: float = 0.09,
-                 node_colors: list = None) -> list:
+                 node_colors: list = None, a_axes: tuple = None) -> list:
     """Emit the standard Expresii record header that precedes every `s` frame
     in a real recorded .XST (see references/star.XST). Mirroring this exactly
     is what makes a generated stroke actually deposit — the server ignores a
@@ -662,6 +688,9 @@ def _star_header(size: float = 6.0, wetness: float = 0.09,
 
     node_colors: list of 9 (r,g,b) for brush nodes 0..8 (tip->root); defaults to
     the recorded star's rainbow ramp.
+    a_axes: list of 4 axis ids for the `a` lines. Default (0,1,2,3) rotates
+    the tuft through its 4 axes; all-zero (0,0,0,0) collapses to a fixed
+    node mapping (pre-update rainbow used this).
     """
     lines = [
         "T   0.00000",
@@ -672,7 +701,6 @@ def _star_header(size: float = 6.0, wetness: float = 0.09,
         "k   0.00000",
     ]
     if node_colors is None:
-        # recorded star's rainbow tuft gradient (nodes 0..8)
         node_colors = [
             (230, 25, 25), (230, 179, 25), (128, 230, 25), (25, 230, 77),
             (25, 229, 230), (25, 76, 230), (127, 25, 230), (230, 25, 178),
@@ -680,14 +708,15 @@ def _star_header(size: float = 6.0, wetness: float = 0.09,
         ]
     for i, (r, g, b) in enumerate(node_colors):
         lines.append(f"l {i} {int(r)} {int(g)} {int(b)}")
-    for _ in range(4):
-        lines.append("a   0.00000   0.00000")
+    for ax in (a_axes or (0, 1, 2, 3)):
+        lines.append(f"a   {ax}.00000   0.00000")
     return lines
 
 
 def build_star(cx: float = 0.0, cy: float = 0.0, outer: float = 3.2,
                inner: float = 2.7, points: int = 5, rainbow: bool = True,
-               size: float = 6.0,
+               size: float = 6.0, clear_first: bool = True,
+               a_axes: tuple = None,
                pprofile: str = None, wprofile: str = None,
                sprofile: str = None) -> str:
     """
@@ -706,9 +735,11 @@ def build_star(cx: float = 0.0, cy: float = 0.0, outer: float = 3.2,
 
     rainbow=True (default): use the recorded rainbow node gradient.
     rainbow=False: use a single-hue gradient (tip=root color) — a one-color star.
+    clear_first=True (default): prepend a `c` clear so the rendered image reflects
+    ONLY these commands (otherwise the canvas accumulates prior drawings and the
+    result is unverifiable / can mask a bad stroke).
 
-    Returns a composite-ready XST block; the caller adds the leading `c` clear
-    (or wrap with build_composite(clear_first=True)).
+    Returns a ready-to-send XST string.
     """
     # 2*points vertices alternating outer/inner, starting at the top (-y).
     verts = []
@@ -731,47 +762,50 @@ def build_star(cx: float = 0.0, cy: float = 0.0, outer: float = 3.2,
     else:
         node_colors = None  # caller can override via _star_header default
 
-    lines = _star_header(size=size, node_colors=node_colors)
-    # wetness/scratch are set in the header's `w`; also emit a single `i`.
+    lines = []
+    if clear_first:
+        lines.append("c")  # clear canvas so the result reflects ONLY these commands
+    lines += _star_header(size=size, node_colors=node_colors, a_axes=a_axes)
     lines.append("i   0.50000")
 
-    # single pen-down marker (brush engaged) — like the recorded star.XST,
-    # which has exactly one `b` for the whole continuous stroke.
-    lines.append("b " + " ".join("0.00000" for _ in range(30)))
+    # --- New (updated) Expresii app contract, extracted from a star recorded
+    # on the updated app ("blue star.XST", which renders a clean pentagram):
+    #   * z LIFT  = +0.088 (brush off paper)
+    #   * z PRESS = -0.375 (brush pressed into paper)
+    #   * pressure ramps 0 -> 0.75 along each edge, then back to 0 at the end
+    #   * exactly ONE `b` pen-down marker, emitted right after the first
+    #     (lifted) frame; the stroke is ONE continuous path; only the very
+    #     first and very last frames lift (p=0).
+    #   * pitch/roll stay roughly constant (-27.5 / -24.25) — the color comes
+    #     from the fixed tuft node gradient, not from rotating the brush.
+    Z_LIFT = 0.08750
+    Z_PRESS = -0.37500
+    P_MAX = 0.75
+    ROLL0, PITCH0 = -24.25, -27.50
+    seg_per_edge = 28
 
-    seg_per_edge = 24   # moderate density (recorded star varies ~10-120/edge)
+    # First (lifted) frame at the start vertex.
+    ax0, ay0 = verts[0]
+    lines.append(f"s {ax0:.5f} {ay0:.5f} {Z_LIFT:.5f} {PITCH0:.5f} {ROLL0:.5f} 0 0.00000")
+    # No `b` marker: brush-down is detected from the lifted frame (p=0) immediately
+    # followed by the first edge's press frame (p>0) — consecutive s, no command
+    # between. A `b` here would obstruct the mark (Expresii ignores b for contact).
+
     n_edges = len(verts)
-    roll0, pitch0 = -28.0, -21.0
-    z_lift = 0.54351     # recorded lift height
-    # recorded star skims the paper: pressure ~0.10, z dips only to ~0.47
-    # (slope ~0.75). A heavy press (p=0.55, z to -0.35) smears the wide
-    # brush into the center crossing and paints a stray inner star — so we
-    # match the recorded light touch exactly.
-    p_edge = 0.10
-    z_slope = 0.75
-    dwell = 2            # frames the brush stays lifted at each vertex
     for ei in range(n_edges):
         ax, ay = verts[ei]
         bx, by = verts[(ei + 1) % n_edges]
-        t_edge = ei / max(1, n_edges)
-        roll = roll0 - 7.0 * t_edge
-        pitch = pitch0 - 14.0 * t_edge
-        # lifted dwell at the start of this edge (brush up at the vertex)
-        for _ in range(dwell):
-            lines.append(f"s {ax:.5f} {ay:.5f} {z_lift:.5f} {pitch:.5f} {roll:.5f} 0 0.00000")
-        # lightly-skimming contact frames along the edge (matches recorded star)
+        # pressure ramps up 0->P_MAX over the edge, then eases back toward 0
         for j in range(1, seg_per_edge + 1):
             f = j / seg_per_edge
             x = ax + (bx - ax) * f
             y = ay + (by - ay) * f
-            z = z_lift - z_slope * p_edge
-            lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p_edge:.5f}")
-        # lifted dwell at the END of this edge (brush up at the vertex)
-        for _ in range(dwell):
-            lines.append(f"s {bx:.5f} {by:.5f} {z_lift:.5f} {pitch:.5f} {roll:.5f} 0 0.00000")
-
-    # single pen-up marker
-    lines.append("b " + " ".join("0.00000" for _ in range(30)))
+            # smooth ramp up then slight ease so the final frame is near 0
+            p = P_MAX * (1.0 - (1.0 - f) ** 2) if f < 0.9 else P_MAX * (1.0 - (f - 0.9) / 0.1 * 0.25)
+            z = Z_LIFT + (Z_PRESS - Z_LIFT) * p
+            lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {PITCH0:.5f} {ROLL0:.5f} 0 {p:.5f}")
+    # Trailing lift at the final vertex (brush up off paper).
+    lines.append(f"s {verts[-1][0]:.5f} {verts[-1][1]:.5f} {Z_LIFT:.5f} {PITCH0:.5f} {ROLL0:.5f} 0 0.00000")
     return "\n".join(lines) + "\n"
 
 
@@ -841,9 +875,9 @@ def build_dab(pos, direction="E", tilt_deg: float = 54.0, color="Cobalt:Vermilio
             for line in _color_l_all_nodes(cargs[0]):
                 lines.append(line)
     lines.append(f"i {scratch:.5f}")
-    # b marker (pen down) — 30 base values like the recorded sample
-    lines.append("b " + " ".join(f"{0.01:.5f}" if i in (0, 25) else "0.00000"
-                                  for i in range(30)))
+    # No `b` marker (pen down): brush-down is the lifted posture frame (p=0)
+    # immediately followed by the first press frame (p>0) below — consecutive s,
+    # no command between. A `b` here would obstruct the mark.
     # pen-down posture (lifted), then pressed frames with the splay
     lines.append(f"s {x:.5f} {y:.5f} 0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
     z0 = 0.0625
@@ -861,10 +895,9 @@ def build_dab(pos, direction="E", tilt_deg: float = 54.0, color="Cobalt:Vermilio
         p = pressure * (0.5 - 0.5 * math.cos(math.pi * k / n_up))
         z = z0 - 0.5 * p
         lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
-    # pen-up posture (lifted)
+    # pen-up posture (lifted) — last press frame (p>0) above immediately precedes
+    # this (p=0), a consecutive s >0->0 pair = Expresii pen-up. No `b`.
     lines.append(f"s {x:.5f} {y:.5f} 0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
-    lines.append("b " + " ".join(f"{0.01:.5f}" if i in (0, 25) else "0.00000"
-                                  for i in range(30)))
     return "\n".join(lines) + "\n"
 
 
@@ -906,13 +939,19 @@ def fetch_render(host: str, port: int, request_id: int, out_path: str,
     """
     Poll GET /result/<requestId> and save the rendered paper (base64 PNG).
 
-    Mirrors the official Command Console client: poll every ~0.9s and accept the
-    frame only once the server reports status == 'done' (it carries the final
-    imageBase64). This is what makes the client "always return the correct
-    image" — it waits for the server's done signal instead of grabbing whatever
-    frame is served first (which can be a previous/stale render). We accept the
-    FIRST done frame; Expresii serves it for a short window after playback +
-    ~5s wet-paint buffer, so poll fast once done.
+    Mirrors the official Command Console client: poll every ~0.9s and accept
+    the frame only once the server reports status == 'done' (it carries the
+    final imageBase64). This is what makes the client "always return the
+    correct image" — it waits for the server's done signal instead of grabbing
+    whatever frame is served first (which can be a previous/stale render).
+
+    SERVER QUEUE (post-v2026.07.26): the server now has its own
+    inbound queue, so a just-POSTed command may report status == 'queued'
+    (waiting in line behind an earlier render) or 'rendering' (playback in
+    progress) before it reaches 'done'. BOTH 'queued' and 'rendering'
+    are treated as in-flight and polling continues — there is no longer a
+    stuck 'rendering' wedge (the old failure mode on pre-queue servers),
+    so a result is eventually returned for every sent command.
 
     Returns {'ok': True, 'bytes': N, 'path': out_path} on success, else
     {'ok': False, 'error': ...}.
@@ -929,6 +968,10 @@ def fetch_render(host: str, port: int, request_id: int, out_path: str,
             payload = json.loads(conn.getresponse().read().decode("utf-8", errors="replace"))
             conn.close()
             last_status = payload.get("status")
+            # In-flight: server-side queue or active rendering. Keep polling.
+            if last_status in ("queued", "rendering"):
+                time.sleep(interval)
+                continue
             if last_status == "done":
                 b64 = payload.get("imageBase64")
                 err = payload.get("error")
@@ -995,6 +1038,14 @@ def main():
                     help="Seconds to wait BEFORE polling /result (the server needs a moment to "
                          "start playback). The poll then waits for status='done' (default: 2.0). "
                          "Raise this if the first polls return before the render starts.")
+    ap.add_argument("--pace", type=float, default=0.0,
+                    help="Seconds to wait AFTER a request's 'done' frame before returning/sending "
+                         "the next command. The Expresii server snapshots the paper on a ~5s "
+                         "post-playback timer that RESETS on every new command, and its shared "
+                         "stroke recorder + first-not-ready result slot mean two commands must "
+                         "never be in flight at once. The lock + wait-for-'done' already serialize "
+                         "sends; set --pace 6 (or more) only when you deliberately pipeline several "
+                         "XSTs in one run, to fully clear that window between them. Default: 0.")
     ap.add_argument("--composite", metavar="SPEC.json",
                     help="Build a multi-stroke composite from a JSON spec file. The spec is a "
                          "JSON array of stroke descriptors, e.g. "
@@ -1135,6 +1186,8 @@ def main():
                 break
             # Re-send to get a fresh requestId and another shot at the poll.
             if attempt < args.verify_retries:
+                if args.pace > 0:
+                    time.sleep(args.pace)
                 result = send_xst(args.host, args.port, xst_text, args.timeout,
                                  max_width=args.max_width, max_height=args.max_height)
                 if not result.get("ok"):
@@ -1144,6 +1197,11 @@ def main():
             else:
                 print(f"RENDER failed after {attempt + 1} tries: {r.get('error', '')} "
                       f"Screenshot the Expresii window to confirm.", file=sys.stderr)
+
+    # Optional post-done pacing so a following command starts after the
+    # server's ~5s snapshot window has fully closed (never two in flight).
+    if args.pace > 0 and result.get("ok"):
+        time.sleep(args.pace)
 
     sys.exit(0 if result["ok"] else 3)
 

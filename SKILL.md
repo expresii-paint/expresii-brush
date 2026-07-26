@@ -73,18 +73,18 @@ Plain text, one command per line, `#` for comments, space-separated params. The 
 | `B` | `B <size>` | 1.0–7.0 | Set brush size |
 | `w` | `w <wetness>` | 0.01–1.0 | Set brush wetness (water/pigment ratio) |
 | `i` | `i <scratch>` | 0.0–1.0 | Set brush scratchiness (dry-brush texture) |
-| `l` | `l <node> <R> <G> <B> <A>` | 0–255 | Set color at brush node (9 nodes: 0=tip, 8=root) |
+| `l` | `l <node> <R> <G> <B>` | 0–255 | Set color at brush node (9 nodes: 0=tip, 8=root). Binds to the most recent `C` profile; omit `C` to use the currently-selected profile. |
 | `s` | `s <x> <y> <z> <tY> <tX> <barrel> <pressure>` | pressure 0–1 | One stroke frame |
 
 **The z-pressure coupling is load-bearing, not decorative.** Empirically derived from sample strokes:
 
-```
-z = 0.0625 − 0.125 × pressure
+```text
+z = 0.0875 − 0.4625 × pressure     # lift z=+0.0875 at p=0, press z=−0.375 at p=0.75
 ```
 
-- `pressure = 0.0` → `z = +0.0625` (brush fully lifted, no contact)
-- `pressure = 0.5` → `z =  0.0000` (tip just touching paper)
-- `pressure = 0.75` → `z = −0.03125` (pressed into paper, more pigment deposit)
+- `pressure = 0.0` → `z = +0.0875` (brush fully lifted, no contact)
+- `pressure = 0.5` → `z = −0.14375`
+- `pressure = 0.75` → `z = −0.375` (pressed into paper, more pigment deposit)
 - `pressure = 1.0` → `z = −0.0625` (max press, max deposit)
 
 Setting `z = 0` with non-zero pressure produces a thin, barely-visible stroke — the brush is at the threshold of contact, not actually pressing in. To get a visible, pigmented line, either commit to the formula above, or use `pressure ≥ 0.7` with `z ≤ −0.025`.
@@ -96,14 +96,31 @@ To lift the brush between disconnected strokes, set `pressure = 0` and `z = 0.06
 Expresii registers a stroke only when the brush transitions **lifted → contact → lifted**. For an **open** stroke (a line, a curve, anything that doesn't loop back to its start), bracket it with two bookend `s` frames:
 
 ```text
-# brush DOWN (lifted) at the start point
-s <x0> <y0> 0.06250 0 0 0 0.00000
-# ... real stroke frames at pressure 0.5–0.8 ...
-# brush UP (lifted) at the end point
-s <x1> <y1> 0.06250 0 0 0 0.00000
+# brush DOWN (lifted = pressure 0) at the start point
+s <x0> <y0> 0.08750 -26.0 -53.0 0 0.00000
+# ... real stroke frames, pressure ramping 0 -> >0 (first frame MUST be >0) ...
+s <x0> <y0> 0.07911 -26.0 -53.0 0 0.00116
+# brush UP (lifted = pressure 0) at the end point
+s <x1> <y1> 0.08750 -26.0 -53.0 0 0.00000
 ```
 
-**Closed loops are different.** For a circle/ring, do NOT add a trailing lift bookend — the loop's last contact frame already meets the first at the seam with pressure on both sides, so it closes continuously. A trailing lift raises the brush exactly at the join and opens a **visible gap**. Use only a leading (brush-down) bookend for closed loops. (This is why `build_circle()` emits a leading bookend and no trailing one; `build_stroke_command()` emits both, for open strokes.)
+**`b` (brush marker) commands are NOT used and must be omitted.** Expresii
+detects the brush-down event purely from **two consecutive `s` frames whose
+pressure goes `0 → >0`**, with NO other command between them. A `b` line between
+the lifted frame and the first press frame breaks that adjacency and the stroke
+silently makes no mark. The same applies in reverse for brush-up (`>0 → 0`).
+So: never emit `b`; let the consecutive `s` pressure transition carry contact.
+
+(Old reference recordings wrap marks in `b ... b` — that is app-internal and
+must NOT be reproduced when authoring XST. Omit `b` entirely.)
+
+**Closed loops are different.** For a circle/ring, do NOT add a trailing lift
+bookend — the loop's last contact frame already meets the first at the seam
+with pressure on both sides, so it closes continuously. A trailing lift raises
+the brush exactly at the join and opens a **visible gap**. Use only a leading
+(brush-down) bookend for closed loops. (This is why `build_circle()` emits a
+leading bookend and no trailing one; `build_stroke_command()` emits both, for
+open strokes.)
 
 Without the leading bookend the brush never touches the paper and **the canvas stays blank** even though the POST returns HTTP 200. This is the single most common cause of "I sent it but nothing drew." The helper emits the right bookends automatically — if you hand-write XST, follow the rules above.
 
@@ -204,6 +221,7 @@ After sending, the helper exits 0 on success and prints `OK  sent N chars to <ho
 
 - **Authoritative:** look at the Expresii canvas/window directly (or have the user screenshot it).
 - **Self-verify (reliable):** pass `--verify OUT.png`. The helper mirrors the official Command Console client: it POSTs `message` (+ `maxWidth`/`maxHeight` placeholder fields, for wire-format parity) to `/confirm-ajax`, then polls `GET /result/<id>` every ~0.9s and saves the frame only once the server reports `status == "done"` (carrying the final `imageBase64`). The reliable result comes from waiting for `done` — that's why the client "always returns the correct image" instead of grabbing a first-served (possibly previous/stale) frame. The captured frame is THIS render. If it still fails, the authoritative check is the Expresii window. Tune with `--verify-retries N` / `--verify-wait S`.
+- **Server protocol (from the Delphi source):** the server shares ONE global stroke recorder across threads, and `RenderComplete` fills the *first not-ready* result slot (not the request that triggered it). After playback it snapshots the paper on a ~5s post-playback timer that RESETS on every new command. Reliable-send consequences: (1) **never have two commands in flight** — back-to-back sends race on the shared recorder and the first-not-ready slot, so they merge or return a stale image; (2) **await `done` before the next send** — `done` only appears after that snapshot fires. The server emits only `rendering`/`done` (no `queued`; `fetch_render` tolerates a `queued` state defensively). `send_xst` serializes every POST through a process-wide lock (mirroring the console's "Send & Render" button disabling itself while one command renders) and `fetch_render` blocks until `status == 'done'`, so a single `--verify` already does the right thing — no fixed `sleep` is required. `--pace N` optionally waits N seconds after `done` to fully clear the 5s window when you deliberately pipeline several XSTs in one run. Safest of all: combine multiple strokes into ONE `.xst` (clear + all strokes) and send it as a single POST.
 - For automated tests, count the frames in your XST and confirm `sent_chars` matches what you expected to send.
 
 See `EXAMPLES.md` for complete worked examples (single ink wash stroke, calligraphy curve, multi-color flower, clearing the canvas, error recovery).
