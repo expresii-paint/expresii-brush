@@ -49,6 +49,29 @@ posture at one moment in time. Expresii interpolates between frames.
 No parameters. Wipes the canvas. Use this to start a fresh painting; do NOT
 use it between strokes of the same composition.
 
+### `L` — Select active layer
+
+```text
+L <x>
+```
+
+Selects the active layer by index. `x = 0` is the **topmost** layer, `1` is
+the layer directly below it, `2` the one below that, and so on. Indices are
+**top-down**: smaller x = higher in the stack.
+
+- `x < 0` → ignored (no-op).
+- `x > (layer count − 1)` → ignored (no-op).
+
+Example — paint two overlapping dry-brush strokes on separate layers so each
+keeps its own trajectory/look, then let the layers composite:
+
+```text
+L 0
+# ... c / B / w / i / s-frames for the long 'mid' stroke ...
+L 1
+# ... c / B / w / i / s-frames for the short 'mid_short' stroke ...
+```
+
 ### `B` — Brush size
 
 ```
