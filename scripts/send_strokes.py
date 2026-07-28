@@ -23,8 +23,10 @@ import argparse
 import http.client
 import json
 import math
+import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -565,7 +567,8 @@ def _interp(pts: list, t: float) -> float:
 def build_profile_stroke(waypoints: list, size: float = 6.0,
                          pprofile: str = "Standard", wprofile: str = "Level 5 — Medium",
                          sprofile: str = "None", segments: int = 16,
-                         closed: bool = False, color=None, tilt=0.0) -> str:
+                         closed: bool = False, color=None, tilt=0.0,
+                         wobble: tuple = (0, 0)) -> str:
     """
     Build an XST stroke using named pressure/wetness/scratch profiles.
 
@@ -578,6 +581,9 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     segments  : how many chunks to split the path into (more = smoother wet/scratch
                 variation along the stroke)
     closed    : if True, NO trailing lift (loop closes itself; see build_circle rule)
+    wobble    : (amp, cycles) — brush-yaw (Turn field) oscillation along the stroke,
+                the side-to-side "wiggle". amp in degrees (0 = straight). Mirrors the
+                dry-brush mid scheme's lateral sweep so wet strokes can wiggle too.
 
     The stroke is emitted as one continuous path. `w`/`i` are re-issued per
     segment (Expresii keeps the brush down across re-issues). Pressure is
@@ -651,6 +657,7 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     # frame is what registers contact. (A `b` between them breaks the mark.)
 
     seg = max(1, segments)
+    wob_amp, wob_cyc = wobble if isinstance(wobble, (tuple, list)) else (0, 0)
     # one continuous stroke: emit an `s` frame at EVERY segment boundary so the
     # brush actually travels (a 2-waypoint path would otherwise produce only
     # endpoint frames with empty segments between -> nothing draws).
@@ -667,7 +674,13 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
         # s <x> <y> <z> <Pitch> <Roll> <Turn> <Pressure>
         # The 2D tilt (roll, pitch) splays the tuft sideways so the node
         # gradient shows across the stroke WIDTH (see references/xst-format.md).
-        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
+        # wobble: a LATERAL y-offset oscillation of the PATH itself (world units)
+        # -- this is what makes the stroke visibly snake, independent of brush
+        # tilt. (The dry-mid scheme gets the same look via a hard tuft tilt +
+        # yaw sweep; for wet/flat strokes we move the path directly, since a
+        # bare yaw/Turn field does not translate the stroke laterally.)
+        yw = y + wob_amp * math.sin(wob_cyc * math.pi * t) if wob_amp else y
+        lines.append(f"s {x:.5f} {yw:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
 
     if not closed:
         x1, y1, _ = waypoints[-1]
@@ -714,7 +727,7 @@ def _star_header(size: float = 6.0, wetness: float = 0.09,
 
 
 def build_star(cx: float = 0.0, cy: float = 0.0, outer: float = 3.2,
-               inner: float = 2.7, points: int = 5, rainbow: bool = True,
+               inner: float = 1.3, points: int = 5, rainbow: bool = True,
                size: float = 6.0, clear_first: bool = True,
                a_axes: tuple = None,
                pprofile: str = None, wprofile: str = None,
@@ -901,6 +914,253 @@ def build_dab(pos, direction="E", tilt_deg: float = 54.0, color="Cobalt:Vermilio
     return "\n".join(lines) + "\n"
 
 
+# --- Dry-brush strokes (validated against recorded samples) -----------------
+# Three recipes, all confirmed to paint in Expresii:
+#   * "ends"        scratchy feathered tips + solid middle (horse sketch)
+#   * "progression" low-wetness dry → wetter; bottom stroke skips (5-stroke)
+#   * "speed"       constant wetness but fast mid-bursts create internal grain
+# All emit NO `b` (brush-down is two consecutive `s` frames p=0→>0).
+Z_LIFT_DRY = 0.08750
+
+
+def _dry_header(size, color, scratch):
+    """Shared preamble: brush select, scratch, 9 color nodes, no `c`."""
+    R, G, B = color
+    L = [f"B {size:.5f}", f"i {scratch:.5f}"]
+    for n in range(9):
+        L.append(f"l {n} {R} {G} {B}")
+    return L
+
+
+def _dry_ramp_ends(fx):
+    """Wetness along the stroke: driest at both ends, wetter in the middle."""
+    if fx < 0.15:
+        return 0.010
+    if fx < 0.30:
+        return 0.030
+    if fx < 0.55:
+        return 0.055
+    if fx < 0.70:
+        return 0.040
+    if fx < 0.85:
+        return 0.025
+    return 0.010
+
+
+def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0)):
+    """One horizontal dry stroke for the given scheme. Returns XST lines."""
+    L = []
+    if scheme == "ends":
+        B, scratch, tilt = 1.0, 1.0, (-50.0, -15.0)
+        zcoup = 0.165
+        peak = 0.75
+        seg = 90
+        L += _dry_header(B, color, scratch)
+        # brush DOWN: two lift dwells, then solid first press (no w/i between)
+        L.append(f"s {x0:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+        L.append(f"s {x0:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+        L.append(f"s {x0:.5f} {y:.5f} 0.02944 {tilt[0]:.5f} {tilt[1]:.5f} 0 0.26448")
+        f, last_w = 0.0, None
+        while f < 1.0:
+            f2 = min(1.0, f + 1.0 / seg)
+            fx = (f + f2) / 2.0
+            x = x0 + (x1 - x0) * fx
+            p = peak * math.sin(math.pi * fx)
+            if fx > 0.86:                      # end dip -> feathered tip
+                p *= max(0.0, (1.0 - fx) / 0.14)
+            z = Z_LIFT_DRY - zcoup * p
+            w = _dry_ramp_ends(fx)
+            if w != last_w:
+                L.append(f"w {w:.5f}"); last_w = w
+            L.append(f"s {x:.5f} {y:.5f} {z:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 {p:.5f}")
+            f = f2
+        L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+        L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+    else:
+        B = 6.0
+        zcoup = 0.617
+        peak = 0.75
+        seg = 90
+        if scheme == "progression":
+            # low wetness at top (idx 0) → very low at bottom (skip)
+            w = 0.060 if n <= 1 else 0.060 - 0.050 * (idx / (n - 1))
+            scratch = 0.0
+            speed_mult = lambda f: 1.0
+        elif scheme == "speed":
+            # constant mid wetness, fast bursts mid-stroke = internal grain
+            w = 0.20
+            scratch = 0.0
+            speed_mult = lambda f: 3.5 if (0.40 <= f <= 0.48 or 0.62 <= f <= 0.70) else 1.0
+        elif scheme == "mid":
+            # dry-brush-stroke-mid: scratchy through the WHOLE stroke, not just
+            # the ends. The lever is sweeping the tuft side-to-side (brush Yaw,
+            # and a little Roll) WHILE FULLY PRESSED -- broken tracks without
+            # lifting the tuft. Dry bristles (low wetness) + fast mid-bursts add
+            # extra grain. FIX #1: pressure floor (min 0.45 at the ends) so the
+            # stroke reaches its full length instead of truncating to ~0.3 like
+            # the old sin(pi*fx) envelope did. The mid stays porous/grainy.
+            B = 1.0
+            zcoup = 0.165
+            peak = 0.70
+            floor = 0.45
+            seg = 240
+            yaw_amp = 0.70
+            yaw_cycles = 14.0
+            roll_amp = 14.0
+            speed_mult = lambda f: 3.0 if (0.28 <= f <= 0.52 or 0.56 <= f <= 0.74) else 1.0
+            w = 0.004
+            scratch = 1.0
+            tilt = (-50.0, -15.0)
+            L += _dry_header(B, color, scratch)
+            L.append(f"s {x0:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+            L.append(f"s {x0:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+            L.append(f"s {x0:.5f} {y:.5f} 0.02944 {tilt[0]:.5f} {tilt[1]:.5f} 0 0.26448")
+            f, last_w = 0.0, None
+            while f < 1.0:
+                step = (1.0 / seg) / speed_mult(f)
+                f2 = min(1.0, f + step)
+                fx = (f + f2) / 2.0
+                x = x0 + (x1 - x0) * fx
+                # envelope 0..1, but floored so ends keep depositing -> full length
+                env = floor + (1.0 - floor) * math.sin(math.pi * fx)
+                p = peak * env
+                z = Z_LIFT_DRY - zcoup * p
+                yaw = yaw_amp * math.sin(yaw_cycles * math.pi * fx)
+                roll = tilt[1] + roll_amp * math.sin(yaw_cycles * math.pi * fx + 1.5)
+                if w != last_w:
+                    L.append(f"w {w:.5f}"); last_w = w
+                # s <x> <y> <z> <pitch> <roll> <yaw/heading> <pressure>
+                L.append(f"s {x:.5f} {y:.5f} {z:.5f} {tilt[0]:.5f} {roll:.5f} {yaw:.5f} {p:.5f}")
+                f = f2
+            L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+            L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+            return L
+        elif scheme == "mid_short":
+            # dry-brush-stroke-mid-short: the OLD intentionally-short scratchy
+            # look -- pressure envelope sin(pi*fx) drives pressure to ~0 at both
+            # ends, so the tuft barely deposits until mid-stroke and the visible
+            # stroke truncates to ~0.3 of its nominal length. Useful layered
+            # UNDER a full-length 'mid' (same trajectory): overlapping long +
+            # short dry strokes give a dense-core / broken-ends combined look.
+            B = 1.0
+            zcoup = 0.165
+            peak = 0.70
+            seg = 240
+            yaw_amp = 0.70
+            yaw_cycles = 14.0
+            roll_amp = 14.0
+            speed_mult = lambda f: 3.0 if (0.28 <= f <= 0.52 or 0.56 <= f <= 0.74) else 1.0
+            w = 0.004
+            scratch = 1.0
+            tilt = (-50.0, -15.0)
+            L += _dry_header(B, color, scratch)
+            L.append(f"s {x0:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+            L.append(f"s {x0:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+            L.append(f"s {x0:.5f} {y:.5f} 0.02944 {tilt[0]:.5f} {tilt[1]:.5f} 0 0.26448")
+            f, last_w = 0.0, None
+            while f < 1.0:
+                step = (1.0 / seg) / speed_mult(f)
+                f2 = min(1.0, f + step)
+                fx = (f + f2) / 2.0
+                x = x0 + (x1 - x0) * fx
+                p = peak * math.sin(math.pi * fx)          # full pressure, no mid dip
+                if fx > 0.88:                              # feathered end only
+                    p *= max(0.0, (1.0 - fx) / 0.12)
+                z = Z_LIFT_DRY - zcoup * p
+                yaw = yaw_amp * math.sin(yaw_cycles * math.pi * fx)
+                roll = tilt[1] + roll_amp * math.sin(yaw_cycles * math.pi * fx + 1.5)
+                if w != last_w:
+                    L.append(f"w {w:.5f}"); last_w = w
+                # s <x> <y> <z> <pitch> <roll> <yaw/heading> <pressure>
+                L.append(f"s {x:.5f} {y:.5f} {z:.5f} {tilt[0]:.5f} {roll:.5f} {yaw:.5f} {p:.5f}")
+                f = f2
+            L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+            L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+            return L
+        else:
+            raise ValueError(f"unknown dry scheme: {scheme!r}")
+        tilt = seed_tilt
+        L += _dry_header(B, color, scratch)
+        L.append(f"s {x0:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+        L.append(f"w {w:.5f}")
+        f = 0.0
+        while f < 1.0 - 1e-9:
+            step = (1.0 / seg) / speed_mult(f)
+            f2 = min(1.0, f + step)
+            fx = (f + f2) / 2.0
+            x = x0 + (x1 - x0) * fx
+            p = peak * math.sin(math.pi * fx)
+            z = Z_LIFT_DRY - zcoup * p
+            L.append(f"s {x:.5f} {y:.5f} {z:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 {p:.5f}")
+            f = f2
+        L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
+    return L
+
+
+def select_layer(x: int) -> str:
+    """Return the layer-select command text.
+
+    Expresii `L <x>` selects the active layer. `x = 0` is the TOPMOST layer,
+    `1` is the layer directly below it, `2` the one below that, and so on
+    (top-down index). `x < 0` or `x > (layer_count - 1)` is IGNORED by the
+    app (no-op). We emit it literally — the client can't know the layer
+    count, so no clamping here.
+
+    Use it to paint overlapping strokes on separate layers (the same
+    trajectory drawn once long / once short gives a dense-core, broken-ends
+    combined look). Pair with clear_first=False / --no-clear on the 2nd layer
+    so you don't wipe the first.
+    """
+    return f"L {int(x)}\n"
+
+
+def build_dry_strokes(n: int = 3, x0: float = -3.0, x1: float = 3.0,
+                      ytop: float = 2.5, ystep: float = -1.0,
+                      scheme: str = "ends", color=(30, 90, 200),
+                      clear_first: bool = True, layer: int = None) -> str:
+    """Build N horizontal dry-brush strokes (the three validated recipes).
+
+    scheme:
+      "ends"        hard tilt + max scratch + wetness ramp (dry ends, wet middle)
+                    + end pressure-dip -> feathered scratchy tips, solid middle.
+      "mid"         like 'ends' but the MIDDLE is broken too: dry bristles + a
+                    tuft yaw/roll sweep at full pressure + fast mid-bursts =
+                    grain through the whole stroke. Pressure FLOORED at the ends
+                    so the stroke reaches its FULL length (fix #1).
+      "mid_short"   the OLD intentionally-short look: feathered ends truncate it
+                    to ~0.3 of its length. Layer UNDER 'mid' on the same
+                    trajectory (separate layers) for a dense-core/broken-ends
+                    combined look.
+      "progression" gentle tilt, wetness 0.06→~0.01 top→bottom; bottom skips.
+      "speed"       gentle tilt, mid-bursts of fast motion -> internal grain.
+
+    clear_first prepends a `c` so the result reflects ONLY these strokes.
+    layer (int|None): if not None, prepend an `L <layer>` select so the strokes
+    land on a specific layer. See select_layer().
+    NOTE: to actually clear the canvas reliably the caller should send the
+    clear as its OWN request and wait (~7s) before sending the strokes
+    (see clear_canvas()).
+    """
+    parts = [f"L {int(layer)}" if layer is not None else None]
+    parts = [p for p in parts if p]
+    if clear_first:
+        parts.append("c")
+    for i in range(n):
+        y = ytop + i * ystep
+        parts.append("\n".join(_dry_line(scheme, y, x0, x1, i, n, color)))
+    return "\n".join(parts) + "\n"
+
+
+def clear_canvas() -> str:
+    """Return the clear-paper command text.
+
+    Sending `c` mid-burst races the prior render, so always POST this as its
+    OWN request (serialized via _SEND_LOCK) and sleep ~7s before drawing —
+    that is what makes the next stroke land on a clean paper in Expresii.
+    """
+    return "c\n"
+
+
 def build_composite(strokes: list, clear_first: bool = True) -> str:
     """
     Combine several stroke blocks into ONE XST, ready to send.
@@ -927,10 +1187,99 @@ def build_composite(strokes: list, clear_first: bool = True) -> str:
         # clear (the sub-builders like build_circle emit their own `c`).
         if block.startswith("c\n"):
             block = block[2:].strip()
-        elif block == "c":
+        if block == "c":
             block = ""
         parts.append(block)
     return "\n".join(parts) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Brush Stroke Style Library
+# A named catalog of looks. Each entry is a recipe that, given a path (list of
+# (x, y, pressure) waypoints), returns an XST block painting that path in the
+# style. Wet styles are pure profile recipes over build_profile_stroke() and
+# work on ANY geometry. Dry styles reuse the horizontal dry-brush recipes
+# (build_dry_strokes) — they ignore the path and draw a horizontal sample,
+# since the dry tuft-sweep is geometry-coupled; for those, pass the geometry
+# via n/x0/x1/ytop/ystep instead.
+# ---------------------------------------------------------------------------
+def _wet_waypoints(x0=-3.2, x1=3.2, y=0.0):
+    """Default straight horizontal sample path for wet styles."""
+    return [(x0, y, 0.0), (x1, y, 0.0)]
+
+
+BRUSH_STYLES = {
+    # ---- WET family (flowing, watercolor-like) ----
+    "wet_wash": dict(kind="wet", size=6.0, pprofile="Constant",
+                     wprofile="Level 12 — Wettest", sprofile="None",
+                     tilt=0.0, desc="Fully wet, no texture: a flowing watercolor wash."),
+    "wet_smooth": dict(kind="wet", size=5.0, pprofile="Smooth Bell",
+                       wprofile="Level 5 — Medium", sprofile="None",
+                       tilt=0.0, desc="Wet, smooth, medium: a clean solid stroke."),
+    "wet_satin": dict(kind="wet", size=5.0, pprofile="Smooth Bell",
+                      wprofile="Level 5 — Medium", sprofile="Light",
+                      tilt=0.0, wobble=(0.07, 10.0),
+                      desc="Medium wetness, slight texture, gentle side-to-side wiggle."),
+    "wet_wiggle": dict(kind="wet", size=5.0, pprofile="Smooth Bell",
+                       wprofile="Level 5 — Medium", sprofile="None",
+                       tilt=0.0, wobble=(0.12, 14.0),
+                       desc="Wet stroke with a full lateral wiggle (path snakes side-to-side)."),
+    "ink": dict(kind="wet", size=4.0, pprofile="Fade Out",
+                wprofile="Level 5 — Medium", sprofile="None",
+                tilt=0.0, desc="Calligraphic: full at the head, drying to a tail (fade-out pressure)."),
+    "ink_drybrush": dict(kind="wet", size=4.0, pprofile="Constant",
+                         wprofile="Wet to Dry", sprofile="Build Up",
+                         tilt=0.0, desc="Ink that runs dry across the stroke: wet head, scratchy tail."),
+    # ---- DRY family (dry-bristle, broken/grainy) ----
+    # Dry styles reuse build_dry_strokes(); geometry via x0/x1/ytop/ystep.
+    "dry_ends": dict(kind="dry", scheme="ends",
+                     desc="Scratchy feathered tips, solid middle (dry bristles + hard tilt)."),
+    "dry_mid": dict(kind="dry", scheme="mid",
+                    desc="Broken grain through the WHOLE stroke; reaches full length (fix #1)."),
+    "dry_mid_short": dict(kind="dry", scheme="mid_short",
+                          desc="Intentionally SHORT scratchy look (~0.3 length). Layer under 'dry_mid'."),
+    "dry_speed": dict(kind="dry", scheme="speed",
+                     desc="Gentle tilt + fast mid-bursts -> internal grain."),
+    "dry_progression": dict(kind="dry", scheme="progression",
+                           desc="Wetness ramps 0.06->~0.01 top->bottom; bottom skips."),
+}
+
+
+def build_style_stroke(style: str, waypoints: list = None,
+                       x0: float = -3.2, x1: float = 3.2, ytop: float = 2.5,
+                       ystep: float = -1.0, n: int = 3, color=(30, 90, 200),
+                       layer: int = None) -> str:
+    """Build XST for a named brush style.
+
+    wet styles: paint `waypoints` (falls back to a straight sample path).
+    dry styles: ignore waypoints; draw n horizontal dry strokes from
+                build_dry_strokes(x0,x1,ytop,ystep,n, scheme=...).
+    layer: if not None, prepend `L <layer>`.
+    """
+    if style not in BRUSH_STYLES:
+        raise ValueError(f"unknown brush style: {style!r}; known: {sorted(BRUSH_STYLES)}")
+    spec = BRUSH_STYLES[style]
+    if spec["kind"] == "wet":
+        wp = waypoints if waypoints else _wet_waypoints(x0, x1, ytop)
+        block = build_profile_stroke(
+            wp, size=spec["size"], pprofile=spec["pprofile"],
+            wprofile=spec["wprofile"], sprofile=spec["sprofile"],
+            segments=max(16, len(wp) * 8), tilt=spec.get("tilt", 0.0),
+            color=color, wobble=spec.get("wobble", (0, 0)))
+    else:  # dry
+        block = build_dry_strokes(n=n, x0=x0, x1=x1, ytop=ytop, ystep=ystep,
+                                  scheme=spec["scheme"], color=color, clear_first=False)
+    if layer is not None:
+        block = f"L {int(layer)}\n" + block
+    return block
+
+
+def list_styles() -> str:
+    """Human-readable catalog of all brush styles."""
+    lines = ["Brush stroke styles:", ""]
+    for name, spec in BRUSH_STYLES.items():
+        lines.append(f"  {name:16s} [{spec['kind']}]  {spec['desc']}")
+    return "\n".join(lines) + "\n"
 
 
 def fetch_render(host: str, port: int, request_id: int, out_path: str,
@@ -1065,7 +1414,132 @@ def main():
     ap.add_argument("--tilt", type=float, default=0.0, metavar="DEG",
                     help="Brush Tilt-Y in degrees (tilts the tuft sideways). A gradient "
                          "color defaults to 45°; set 0 for a flat (lengthwise) tuft.")
+    ap.add_argument("--dry", nargs="?", const="ends", metavar="SCHEME",
+                    choices=["ends", "progression", "speed", "mid", "mid_short"],
+                    help="Build N horizontal dry-brush strokes. SCHEME: 'ends' (hard "
+                         "tilt + max scratch + wetness ramp -> scratchy feathered tips, "
+                         "solid middle), 'mid' (like 'ends' but the MIDDLE is broken too: "
+                         "dry middle + fast mid-bursts = grain through the whole stroke), "
+                         "'speed' (gentle tilt, fast mid-bursts -> internal grain), "
+                         "'mid_short' (like 'mid' but the OLD intentionally-short look: "
+                         "feathered ends truncate it to ~0.3 of its length -- layer it "
+                         "UNDER 'mid' on the same trajectory for a dense-core/broken-ends "
+                         "combined look). "
+                         "Default scheme: ends. Use with --n, --x0, --x1, --ytop, "
+                         "--ystep, --color. Always clears the canvas first (its own "
+                         "request + settle), then sends the strokes.")
+    ap.add_argument("--n", type=int, default=3, help="Number of dry strokes (--dry). Default: 3")
+    ap.add_argument("--x0", type=float, default=-3.0, help="Dry stroke start x (--dry). Default: -3.0")
+    ap.add_argument("--x1", type=float, default=3.0, help="Dry stroke end x (--dry). Default: 3.0")
+    ap.add_argument("--ytop", type=float, default=2.5, help="Dry stroke top y (--dry). Default: 2.5")
+    ap.add_argument("--ystep", type=float, default=-1.0, help="Dry stroke y spacing (--dry). Default: -1.0")
+    ap.add_argument("--layer", type=int, default=None,
+                    help="Select layer x before the --dry strokes (Expresii `L <x>`; "
+                         "0=topmost, 1=below it, ...). For overlapping strokes on "
+                         "separate layers, draw layer 0 normally, then use "
+                         "--layer N --no-clear for each further layer so you don't "
+                         "wipe the earlier ones.")
+    ap.add_argument("--no-clear", action="store_true",
+                    help="With --dry: skip the leading clear-canvas request so the "
+                         "strokes ADD to the current canvas (use on layers 1+).")
+    ap.add_argument("--styles", action="store_true",
+                    help="List all brush stroke styles in the library and exit.")
+    ap.add_argument("--swatches", action="store_true",
+                    help="Render ONE sample stroke per style (a swatch sheet) so you "
+                         "can eyeball/compare the looks. Clears the canvas, then draws "
+                         "each style on its own row. Use --verify to save the render.")
     args = ap.parse_args()
+
+    # List the style library and exit.
+    if args.styles:
+        print(list_styles(), end="")
+        sys.exit(0)
+
+    # Swatch sheet: one sample stroke per style, each on its own row.
+    # All styles are combined into ONE XST (clear + every row) and sent as a
+    # SINGLE request, because Expresii's single shared renderer drops earlier
+    # strokes when a new request interrupts playback (sequential sends race).
+    # Rows are kept inside the narrow visible paper band (~y in [-0.5,+0.5])
+    # and spread thin so none clip or merge.
+    if args.swatches:
+        color = args.color or "30,90,200"
+        if isinstance(color, str) and "," in color and color.replace(",", "").isdigit():
+            color = tuple(int(v) for v in color.split(","))
+        names = list(BRUSH_STYLES.keys())
+        blocks = []
+        for i, name in enumerate(names):
+            y = 0.5 - (1.0 * i / max(1, len(names) - 1))   # +0.5 .. -0.5
+            blocks.append(build_style_stroke(
+                name, x0=-2.6, x1=2.6, ytop=y, ystep=0.0, n=1, color=color))
+        xst_text = "\n".join(blocks) + "\n"
+        # Reliable clear as its OWN request + settle, then send all rows at once.
+        clr = send_xst(args.host, args.port, clear_canvas(), args.timeout,
+                       max_width=args.max_width, max_height=args.max_height)
+        if not clr.get("ok"):
+            print(f"FAIL  clear: {clr.get('error', '')}", file=sys.stderr)
+            sys.exit(3)
+        time.sleep(7.0)
+        result = send_xst(args.host, args.port, xst_text, args.timeout,
+                          max_width=args.max_width, max_height=args.max_height)
+        if not result.get("ok"):
+            print(f"FAIL  {result.get('status', '?')}  {result.get('error', '')}",
+                  file=sys.stderr)
+            sys.exit(3)
+        if args.verify:
+            out = args.verify if isinstance(args.verify, str) else "swatches.png"
+            rr = fetch_render(args.host, args.port, result["request_id"], out,
+                             tries=240, interval=1.0, initial_wait=4.0)
+            if rr.get("ok"):
+                print(f"RENDER saved: {rr['path']} ({rr['bytes']} bytes) "
+                      f"({len(names)} styles)")
+            else:
+                print(f"RENDER failed: {rr.get('error', '')} — the canvas likely "
+                      f"painted; screenshot the Expresii window to confirm.",
+                      file=sys.stderr)
+        else:
+            print(f"OK  sent {len(names)} swatches to {args.host}:{args.port}")
+        sys.exit(0)
+
+    # Dry-brush strokes: clear canvas as its OWN request + settle, then draw.
+    if args.dry is not None:
+        color = args.color or "30,90,200"
+        if isinstance(color, str) and "," in color and color.replace(",", "").isdigit():
+            color = tuple(int(v) for v in color.split(","))
+        xst_text = build_dry_strokes(
+            n=args.n, x0=args.x0, x1=args.x1, ytop=args.ytop, ystep=args.ystep,
+            scheme=args.dry, color=color, clear_first=False, layer=args.layer)
+        # Reliable clear: `c` as its own serialized request, then settle ~7s.
+        # (Skipped with --no-clear so extra layers ADD to the existing canvas.)
+        if not args.no_clear:
+            clr = send_xst(args.host, args.port, clear_canvas(), args.timeout,
+                           max_width=args.max_width, max_height=args.max_height)
+            if not clr.get("ok"):
+                print(f"FAIL  clear: {clr.get('error', '')}", file=sys.stderr)
+                sys.exit(3)
+            time.sleep(7.0)
+        result = send_xst(args.host, args.port, xst_text, args.timeout,
+                          max_width=args.max_width, max_height=args.max_height)
+        result["host"] = args.host
+        result["port"] = args.port
+        if args.json:
+            print(json.dumps(result))
+        elif result["ok"]:
+            print(f"OK  sent {result['sent_chars']} chars (scheme={args.dry}) to "
+                  f"{args.host}:{args.port} (HTTP {result['status']})")
+        else:
+            print(f"FAIL  {result.get('status', '?')}  {result.get('error', '')}", file=sys.stderr)
+        if args.verify and result.get("request_id") is not None:
+            out = args.verify if isinstance(args.verify, str) else "render.png"
+            # Dry strokes play back slowly (many segments + a 7s clear); poll
+            # long enough to clear the server's single-slot renderer.
+            r = fetch_render(args.host, args.port, result["request_id"], out,
+                            tries=200, interval=1.0, initial_wait=3.0)
+            if r.get("ok"):
+                print(f"RENDER saved: {r['path']} ({r['bytes']} bytes)")
+            else:
+                print(f"RENDER failed: {r.get('error', '')} — the canvas likely painted; "
+                      f"screenshot the Expresii window to confirm.", file=sys.stderr)
+        sys.exit(0 if result["ok"] else 3)
 
     if args.ping:
         up = ping(args.host, args.port)

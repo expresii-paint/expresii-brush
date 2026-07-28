@@ -70,7 +70,6 @@ Plain text, one command per line, `#` for comments, space-separated params. The 
 | Cmd | Format | Range | What it does |
 |-----|--------|-------|--------------|
 | `c` | (no params) | — | Clear the canvas |
-| `L` | `L <x>` | any int | Select active layer. `x = 0` is the **topmost** layer, `1` is the layer directly below it, `2` below that, and so on (top-down). `x < 0` or `x > (layer count − 1)` is **ignored** (no-op). Newer Expresii feature — not in the official stroke-file spec (`ExpresiiStrokeFileFormatDescription.txt` lists only `s c C B w l i`). Use before a `c`/`B`/`s` sequence to paint on a specific layer — e.g. draw the short dry stroke on one layer and the long one on another, then combine visually. |
 | `B` | `B <size>` | 1.0–7.0 | Set brush size |
 | `w` | `w <wetness>` | 0.01–1.0 | Set brush wetness (water/pigment ratio) |
 | `i` | `i <scratch>` | 0.0–1.0 | Set brush scratchiness (dry-brush texture) |
@@ -200,6 +199,42 @@ Expresii uses a normalized 3D coordinate system centered on the canvas. From the
 7. **Build the stroke frames.** Each `s` line is one brush posture; consecutive frames with changing x/y/pressure form a continuous stroke. Pressure usually ramps: 0 → peak → 0 over the stroke length. For multiple disconnected strokes, add a frame with pressure 0 (lift) before starting the next.
 8. **Send via the helper.** Either write the XST to a temp file and pass it to the helper, or use `--command` / `--stroke` / `--pstroke` / `--preset` / `--circle` / `--composite` flags. Read the result — `OK  sent N chars` on success, `FAIL  no_response` if the server didn't reply.
 9. **Iterate.** If the stroke looks wrong (Expresii shows a stroke-recorder window), adjust waypoints, pressure profile, color, or brush params and re-send. Use `c` to clear the canvas between attempts.
+
+## Brush Stroke Style Library
+
+The skill ships a named catalog of looks in `scripts/send_strokes.py`
+(`BRUSH_STYLES`). Each style is a recipe that paints a path in a distinct
+brush character. Two families:
+
+- **Wet** (`wet_wash`, `wet_smooth`, `wet_satin`, `ink`, `ink_drybrush`) —
+  profile-driven over `build_profile_stroke`; work on ANY geometry (pass
+  `waypoints`). Flowing / watercolor / calligraphic.
+- **Dry** (`dry_ends`, `dry_mid`, `dry_mid_short`, `dry_speed`,
+  `dry_progression`) — the dry-brush recipes; horizontal strokes (geometry
+  via `--x0/--x1/--ytop/--ystep`), grainy/broken texture.
+
+Build one in Python:
+
+```python
+from scripts.send_strokes import build_style_stroke
+# wet: any path
+xst = build_style_stroke("ink", waypoints=[(-2, 1, 0.0), (0, 0, 0.5), (2, -1, 0.8)])
+# dry: horizontal sample
+xst = build_style_stroke("dry_mid", x0=-3.2, x1=3.2, ytop=0.0, n=1)
+```
+
+CLI:
+
+```bash
+# list the catalog
+python "$SKILL_DIR/scripts/send_strokes.py" --styles
+# render ONE sample stroke per style (a swatch sheet) to eyeball/compare
+python "$SKILL_DIR/scripts/send_strokes.py" --swatches --verify /tmp/swatches.png
+```
+
+`build_style_stroke(..., layer=N)` prepends `L <N>` so a style lands on a
+specific layer (see the `L` command above). Add your own by appending to
+`BRUSH_STYLES` (each entry: `dict(kind="wet"|"dry", ...)`).
 
 ## Pitfalls
 
