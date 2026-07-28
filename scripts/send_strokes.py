@@ -651,10 +651,11 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     # leading lift bookend (brush down) at first waypoint
     x0, y0, _ = waypoints[0]
     lines.append(f"s {x0:.5f} {y0:.5f} 0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
-    # Expresii detects brush-down from two consecutive `s` frames going
-    # pressure 0 -> >0, with NO other command between them. So we emit NO `b`
-    # marker here; the loop's first press frame (p>0) right after this lift
-    # frame is what registers contact. (A `b` between them breaks the mark.)
+    # Expresii detects brush-down ONLY from two consecutive `s` frames going
+    # pressure 0 -> >0, with NO other command (w/i/b/...) between them. So the
+    # first press `s` below must immediately follow this lift `s` -- we defer
+    # any w/i emission until AFTER the first press frame. (We used to emit w/i
+    # between the lift and the first press, which silently broke brush-down.)
 
     seg = max(1, segments)
     wob_amp, wob_cyc = wobble if isinstance(wobble, (tuple, list)) else (0, 0)
@@ -668,9 +669,6 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
         z = 0.0625 - 0.25 * p
         wlvl = _interp(wp, t)
         sval = _interp(sp, t)
-        # re-issue wetness/scratch so it tracks the profile (brush stays down)
-        lines.append(f"w {wlvl / 12:.5f}")
-        lines.append(f"i {sval:.5f}")
         # s <x> <y> <z> <Pitch> <Roll> <Turn> <Pressure>
         # The 2D tilt (roll, pitch) splays the tuft sideways so the node
         # gradient shows across the stroke WIDTH (see references/xst-format.md).
@@ -681,6 +679,12 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
         # bare yaw/Turn field does not translate the stroke laterally.)
         yw = y + wob_amp * math.sin(wob_cyc * math.pi * t) if wob_amp else y
         lines.append(f"s {x:.5f} {yw:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
+        # re-issue wetness/scratch AFTER the s frame (never before the first
+        # press) so the brush-down detection (consecutive s, p 0->>0) holds.
+        # Expresii keeps the brush down across mid-stroke w/i re-issues.
+        if k > 0:
+            lines.append(f"w {wlvl / 12:.5f}")
+            lines.append(f"i {sval:.5f}")
 
     if not closed:
         x1, y1, _ = waypoints[-1]
@@ -1082,8 +1086,12 @@ def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0)):
         tilt = seed_tilt
         L += _dry_header(B, color, scratch)
         L.append(f"s {x0:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
-        L.append(f"w {w:.5f}")
+        # NOTE: do NOT emit `w` here. Expresii registers brush-down only from a
+        # consecutive s pair (p=0 -> p>0) with NO other command between. Emit the
+        # first press s FIRST, then the wetness. (The mid/mid_short branches do
+        # the same; this branch previously broke detection by putting w here.)
         f = 0.0
+        first = True
         while f < 1.0 - 1e-9:
             step = (1.0 / seg) / speed_mult(f)
             f2 = min(1.0, f + step)
@@ -1092,6 +1100,9 @@ def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0)):
             p = peak * math.sin(math.pi * fx)
             z = Z_LIFT_DRY - zcoup * p
             L.append(f"s {x:.5f} {y:.5f} {z:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 {p:.5f}")
+            if first:
+                L.append(f"w {w:.5f}")   # wetness only AFTER first press s
+                first = False
             f = f2
         L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
     return L
