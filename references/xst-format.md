@@ -51,8 +51,22 @@ use it between strokes of the same composition.
 
 ### `L` — Select active layer
 
+> Newer Expresii feature; not yet in the official stroke-file spec
+> (`ExpresiiStrokeFileFormatDescription.txt` documents only `s c C B w l i`).
+> Documented here from the app's actual behavior.
+
 ```text
-L <x>
+# 'L' for selecting the active Layer by index. Format:
+# L layer_index
+# layer_index 0 is the TOPMOST layer; 1 is the layer directly below it; 2 the
+# one below that, and so on (top-down). Indices < 0 or > (layer_count - 1) are
+# IGNORED (no-op). Select a layer before a 'c'/'B'/'w'/'i'/'s' sequence to
+# paint on it.
+# Examples:
+L 0
+# ... c / B / w / i / s-frames for the long 'mid' stroke ...
+L 1
+# ... c / B / w / i / s-frames for the short 'mid_short' stroke ...
 ```
 
 Selects the active layer by index. `x = 0` is the **topmost** layer, `1` is

@@ -70,7 +70,7 @@ Plain text, one command per line, `#` for comments, space-separated params. The 
 | Cmd | Format | Range | What it does |
 |-----|--------|-------|--------------|
 | `c` | (no params) | — | Clear the canvas |
-| `L` | `L <x>` | x ≥ 0 | Select active layer. `x = 0` is the **topmost** layer, `1` is the layer directly below it, `2` below that, and so on. Values `x < 0` or `x > (layer count − 1)` are **ignored** (no-op). Use before a `c`/`B`/`s` sequence to paint on a specific layer — e.g. draw the short dry stroke on one layer and the long one on another, then combine visually. |
+| `L` | `L <x>` | any int | Select active layer. `x = 0` is the **topmost** layer, `1` is the layer directly below it, `2` below that, and so on (top-down). `x < 0` or `x > (layer count − 1)` is **ignored** (no-op). Newer Expresii feature — not in the official stroke-file spec (`ExpresiiStrokeFileFormatDescription.txt` lists only `s c C B w l i`). Use before a `c`/`B`/`s` sequence to paint on a specific layer — e.g. draw the short dry stroke on one layer and the long one on another, then combine visually. |
 | `B` | `B <size>` | 1.0–7.0 | Set brush size |
 | `w` | `w <wetness>` | 0.01–1.0 | Set brush wetness (water/pigment ratio) |
 | `i` | `i <scratch>` | 0.0–1.0 | Set brush scratchiness (dry-brush texture) |
