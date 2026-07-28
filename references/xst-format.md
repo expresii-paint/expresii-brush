@@ -44,6 +44,15 @@ A *stroke* is a series of `s` lines with gradually changing x, y, and pressure
 while tilt stays roughly constant. Each frame is a snapshot of the brush
 posture at one moment in time. Expresii interpolates between frames.
 
+**Brush-down registration (critical):** Expresii detects the brush touching
+the paper ONLY from **two consecutive `s` frames** where pressure goes
+`0 → >0`, with **NO other command between them** (`w`, `i`, `b`, `l`, … all
+break it). So a stroke must open with a lift frame `… 0.00000` immediately
+followed by a press frame `… <p> ` (p>0). Emit any `w`/`i` re-issues *after*
+that first press frame, never between the lift and the first press. A trailing
+lift (last frame of an open stroke) may be followed by nothing — that is
+brush-up, not brush-down, and is fine.
+
 ### `c` — Clear canvas
 
 No parameters. Wipes the canvas. Use this to start a fresh painting; do NOT
