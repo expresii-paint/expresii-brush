@@ -301,6 +301,8 @@ def build_stroke_command(waypoints: list, size: float, wetness: float, scratch: 
 PRESSURE_PROFILES = {
     "Standard":   [("t", "p"), (0.0, 0.1), (0.016, 0.568), (0.812, 0.739), (1.0, 0.1)],
     "Smooth Bell":[(0.0, 0.1), (0.25, 0.4), (0.5, 0.8), (0.75, 0.4), (1.0, 0.1)],
+    "Triple Bell":[(0.0, 0.15), (0.20, 0.75), (0.40, 0.25), (0.55, 0.85),
+                   (0.75, 0.20), (0.90, 0.75), (1.0, 0.15)],  # 3 thick peaks
     "Constant":   [(0.0, 0.6), (1.0, 0.6)],
     "Fade In":    [(0.0, 0.0), (0.5, 0.3), (1.0, 0.8)],
     "Fade Out":   [(0.0, 0.8), (0.5, 0.3), (1.0, 0.0)],
@@ -308,6 +310,8 @@ PRESSURE_PROFILES = {
 WETNESS_PROFILES = {  # values are levels 1..12 (XST w = level/12)
     "Level 5 — Medium":     [(0.0, 5), (1.0, 5)],
     "Level 1 — Driest":     [(0.0, 1), (1.0, 1)],
+    "Level 2 — Dry":        [(0.0, 2), (1.0, 2)],
+    "Level 3 — Dry":        [(0.0, 3), (1.0, 3)],
     "Level 12 — Wettest":   [(0.0, 12), (1.0, 12)],
     "Dry to Wet":         [(0.0, 1), (1.0, 12)],
     "Wet to Dry":         [(0.0, 12), (1.0, 1)],
@@ -347,10 +351,11 @@ COLOR_PROFILES = {  # fixed RGB (0..255)
     "Sepia":      (90, 60, 40),
 }
 COLOR_RAMP_PROFILES = {  # HSL ramps (h 0..360, s/l 0..1) along progress t in [0,1]
-    "WarmToCool": [(0.0, (15, 0.8, 0.5)), (1.0, (220, 0.7, 0.45))],
-    "CoolToWarm": [(0.0, (220, 0.7, 0.45)), (1.0, (15, 0.8, 0.5))],
+    "WarmToCool":  [(0.0, (15, 0.8, 0.5)), (1.0, (220, 0.7, 0.45))],
+    "CoolToWarm":  [(0.0, (220, 0.7, 0.45)), (1.0, (15, 0.8, 0.5))],
     "LightToDark":[(0.0, (40, 0.3, 0.8)), (1.0, (40, 0.9, 0.2))],
-    "HueCycle":   [(0.0, (0, 0.8, 0.5)), (0.5, (180, 0.8, 0.5)), (1.0, (360, 0.8, 0.5))],
+    "BlueToDeep":  [(0.0, (210, 0.75, 0.55)), (1.0, (230, 0.85, 0.30))],  # bright mid-blue -> deep indigo
+    "HueCycle":    [(0.0, (0, 0.8, 0.5)), (0.5, (180, 0.8, 0.5)), (1.0, (360, 0.8, 0.5))],
 }
 
 
@@ -951,11 +956,15 @@ def _dry_ramp_ends(fx):
     return 0.010
 
 
-def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0)):
-    """One horizontal dry stroke for the given scheme. Returns XST lines."""
+def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0), size=None):
+    """One horizontal dry stroke for the given scheme. Returns XST lines.
+
+    size: brush size (XST `B`). If None, the scheme's default is used.
+          Pass e.g. 4-6 for a thicker, more visible wiggling dry stroke.
+    """
     L = []
     if scheme == "ends":
-        B, scratch, tilt = 1.0, 1.0, (-50.0, -15.0)
+        B, scratch, tilt = (size if size is not None else 1.0), 1.0, (-50.0, -15.0)
         zcoup = 0.165
         peak = 0.75
         seg = 90
@@ -981,7 +990,7 @@ def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0)):
         L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
         L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
     else:
-        B = 6.0
+        B = size if size is not None else 6.0
         zcoup = 0.617
         peak = 0.75
         seg = 90
@@ -1003,7 +1012,7 @@ def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0)):
             # extra grain. FIX #1: pressure floor (min 0.45 at the ends) so the
             # stroke reaches its full length instead of truncating to ~0.3 like
             # the old sin(pi*fx) envelope did. The mid stays porous/grainy.
-            B = 1.0
+            B = size if size is not None else 1.0
             zcoup = 0.165
             peak = 0.70
             floor = 0.45
@@ -1046,7 +1055,7 @@ def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0)):
             # stroke truncates to ~0.3 of its nominal length. Useful layered
             # UNDER a full-length 'mid' (same trajectory): overlapping long +
             # short dry strokes give a dense-core / broken-ends combined look.
-            B = 1.0
+            B = size if size is not None else 1.0
             zcoup = 0.165
             peak = 0.70
             seg = 240
@@ -1128,7 +1137,8 @@ def select_layer(x: int) -> str:
 def build_dry_strokes(n: int = 3, x0: float = -3.0, x1: float = 3.0,
                       ytop: float = 2.5, ystep: float = -1.0,
                       scheme: str = "ends", color=(30, 90, 200),
-                      clear_first: bool = True, layer: int = None) -> str:
+                      clear_first: bool = True, layer: int = None,
+                      size: float = None) -> str:
     """Build N horizontal dry-brush strokes (the three validated recipes).
 
     scheme:
@@ -1158,7 +1168,7 @@ def build_dry_strokes(n: int = 3, x0: float = -3.0, x1: float = 3.0,
         parts.append("c")
     for i in range(n):
         y = ytop + i * ystep
-        parts.append("\n".join(_dry_line(scheme, y, x0, x1, i, n, color)))
+        parts.append("\n".join(_dry_line(scheme, y, x0, x1, i, n, color, size=size)))
     return "\n".join(parts) + "\n"
 
 
@@ -1235,6 +1245,17 @@ BRUSH_STYLES = {
                        wprofile="Level 5 — Medium", sprofile="None",
                        tilt=0.0, wobble=(0.12, 14.0),
                        desc="Wet stroke with a full lateral wiggle (path snakes side-to-side)."),
+    # ---- COMPOUND: scratch + wobble + thick/thin ----
+    # dry_wiggle: scratchy brush (max i) on a modestly-tilted tuft, low wetness,
+    # with the path wiggling side-to-side and the pressure oscillating three
+    # times (Triple Bell) so the contact alternates THICK -> thin -> THICK ->
+    # thin -> THICK -> thin across one stroke. Reads as a scratchy wiggling
+    # ribbon with distinct thick and thin sections.
+    "dry_wiggle": dict(kind="wet", size=4.0, pprofile="Triple Bell",
+                       wprofile="Level 1 — Driest", sprofile="Maximum",
+                       ramp="BlueToDeep",
+                       tilt=(-30.0, -10.0), wobble=(0.10, 10.0),
+                       desc="Scratchy wiggling stroke with thick/thin pressure, blue tuft gradient, south-leaning hard tilt (tip->north, small brush to offset footprint)."),
     "ink": dict(kind="wet", size=4.0, pprofile="Fade Out",
                 wprofile="Level 5 — Medium", sprofile="None",
                 tilt=0.0, desc="Calligraphic: full at the head, drying to a tail (fade-out pressure)."),
@@ -1243,11 +1264,11 @@ BRUSH_STYLES = {
                          tilt=0.0, desc="Ink that runs dry across the stroke: wet head, scratchy tail."),
     # ---- DRY family (dry-bristle, broken/grainy) ----
     # Dry styles reuse build_dry_strokes(); geometry via x0/x1/ytop/ystep.
-    "dry_ends": dict(kind="dry", scheme="ends",
+    "dry_ends": dict(kind="dry", scheme="ends", size=4.0,
                      desc="Scratchy feathered tips, solid middle (dry bristles + hard tilt)."),
-    "dry_mid": dict(kind="dry", scheme="mid",
+    "dry_mid": dict(kind="dry", scheme="mid", size=4.0,
                     desc="Broken grain through the WHOLE stroke; reaches full length (fix #1)."),
-    "dry_mid_short": dict(kind="dry", scheme="mid_short",
+    "dry_mid_short": dict(kind="dry", scheme="mid_short", size=4.0,
                           desc="Intentionally SHORT scratchy look (~0.3 length). Layer under 'dry_mid'."),
     "dry_speed": dict(kind="dry", scheme="speed",
                      desc="Gentle tilt + fast mid-bursts -> internal grain."),
@@ -1276,10 +1297,11 @@ def build_style_stroke(style: str, waypoints: list = None,
             wp, size=spec["size"], pprofile=spec["pprofile"],
             wprofile=spec["wprofile"], sprofile=spec["sprofile"],
             segments=max(16, len(wp) * 8), tilt=spec.get("tilt", 0.0),
-            color=color, wobble=spec.get("wobble", (0, 0)))
+            color=spec.get("ramp") or color, wobble=spec.get("wobble", (0, 0)))
     else:  # dry
         block = build_dry_strokes(n=n, x0=x0, x1=x1, ytop=ytop, ystep=ystep,
-                                  scheme=spec["scheme"], color=color, clear_first=False)
+                                  scheme=spec["scheme"], color=color,
+                                  clear_first=False, size=spec.get("size"))
     if layer is not None:
         block = f"L {int(layer)}\n" + block
     return block
@@ -1518,7 +1540,8 @@ def main():
             color = tuple(int(v) for v in color.split(","))
         xst_text = build_dry_strokes(
             n=args.n, x0=args.x0, x1=args.x1, ytop=args.ytop, ystep=args.ystep,
-            scheme=args.dry, color=color, clear_first=False, layer=args.layer)
+            scheme=args.dry, color=color, clear_first=False, layer=args.layer,
+            size=args.size)
         # Reliable clear: `c` as its own serialized request, then settle ~7s.
         # (Skipped with --no-clear so extra layers ADD to the existing canvas.)
         if not args.no_clear:
