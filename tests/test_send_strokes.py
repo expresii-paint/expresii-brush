@@ -354,3 +354,86 @@ def test_four_dab_composite_matches_sample_directions():
     assert downs >= 4, downs
 
 
+# ── Cancel queued render (DELETE /cancel/<id>) ────────────────────────────
+
+class _FakeResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    def read(self):
+        return self._body
+
+
+class _FakeConn:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def request(self, method, path, body=None, headers=None):
+        self.requests.append((method, path))
+
+    def getresponse(self):
+        return self.responses.pop(0)
+
+    def close(self):
+        pass
+
+
+def test_cancel_render_success(monkeypatch):
+    import send_strokes
+    monkeypatch.setattr(
+        send_strokes.http.client, "HTTPConnection",
+        lambda host, port, timeout: _FakeConn([
+            _FakeResponse(200, b'{"status":"cancelled"}'),
+        ]),
+    )
+    res = send_strokes.cancel_render("127.0.0.1", 9000, 42)
+    assert res["ok"] is True
+    assert res["status"] == "cancelled"
+
+
+def test_cancel_render_refused_when_rendering(monkeypatch):
+    import send_strokes
+    monkeypatch.setattr(
+        send_strokes.http.client, "HTTPConnection",
+        lambda host, port, timeout: _FakeConn([
+            _FakeResponse(200, b'{"status":"cannot_cancel"}'),
+        ]),
+    )
+    res = send_strokes.cancel_render("127.0.0.1", 9000, 42)
+    assert res["ok"] is False
+    assert res["status"] == "cannot_cancel"
+    assert "already rendering or unknown id" in res["error"]
+
+
+def test_cancel_render_uses_delete_verb(monkeypatch):
+    import send_strokes
+    conn = _FakeConn([_FakeResponse(200, b'{"status":"cancelled"}')])
+    monkeypatch.setattr(
+        send_strokes.http.client, "HTTPConnection",
+        lambda host, port, timeout: conn,
+    )
+    send_strokes.cancel_render("127.0.0.1", 9000, 7)
+    assert conn.requests == [("DELETE", "/cancel/7")]
+
+
+def test_fetch_render_cancel_cb_aborts(monkeypatch):
+    import send_strokes
+    # 1st call: cancel probe fires -> fetch calls cancel_render -> DELETE
+    # 2nd call (cancel probe itself) never happens; the poll loop aborts.
+    monkeypatch.setattr(
+        send_strokes.http.client, "HTTPConnection",
+        lambda host, port, timeout: _FakeConn([
+            _FakeResponse(200, b'{"status":"cancelled"}'),
+        ]),
+    )
+    res = send_strokes.fetch_render(
+        "127.0.0.1", 9000, 42, "C:/Users/Nel/AppData/Local/Temp/nope.png",
+        tries=10, interval=0.05, cancel_cb=lambda: True,
+    )
+    assert res["ok"] is False
+    assert res.get("cancelled") is True
+    assert "cancelled" in res["error"]
+
+

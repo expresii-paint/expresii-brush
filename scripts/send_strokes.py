@@ -1512,9 +1512,43 @@ def list_styles() -> str:
     return "\n".join(lines) + "\n"
 
 
+def cancel_render(host: str, port: int, request_id: int,
+                  timeout: float = 10.0) -> dict:
+    """Ask the server to cancel a queued render job.
+
+    Mirrors the official Command Console client's cancel button: sends
+    `DELETE /cancel/<requestId>` and treats the response as a cancellation
+    only when it reports status == 'cancelled'. The server refuses to cancel
+    a job that has already left the queue (status 'rendering'/'done'), so a
+    non-cancelled reply means "too late — it's already rendering".
+
+    Returns:
+        {'ok': True,  'status': 'cancelled', 'response': ...}  — removed from queue
+        {'ok': False, 'status': <other>, 'error': ...}         — not cancelable / failed
+    """
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("DELETE", f"/cancel/{request_id}")
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", errors="replace")
+        conn.close()
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = {}
+        status = data.get("status", resp.status)
+        if status == "cancelled":
+            return {"ok": True, "status": "cancelled", "response": body[:500]}
+        return {"ok": False, "status": status, "response": body[:500],
+                "error": f"server refused cancel (status {status!r}): already rendering or unknown id"}
+    except (ConnectionRefusedError, socket.timeout, OSError, ValueError) as e:
+        return {"ok": False, "status": "no_response", "error": str(e)}
+
+
 def fetch_render(host: str, port: int, request_id: int, out_path: str,
-                  tries: int = 60, interval: float = 0.9,
-                  initial_wait: float = 0.0) -> dict:
+                 tries: int = 60, interval: float = 0.9,
+                 initial_wait: float = 0.0,
+                 cancel_cb=None) -> dict:
     """
     Poll GET /result/<requestId> and save the rendered paper (base64 PNG).
 
@@ -1532,8 +1566,15 @@ def fetch_render(host: str, port: int, request_id: int, out_path: str,
     stuck 'rendering' wedge (the old failure mode on pre-queue servers),
     so a result is eventually returned for every sent command.
 
+    cancel_cb: optional zero-arg callable checked on every 'queued'/'rendering'
+    poll. When it returns truthy, the job is cancelled via DELETE /cancel/<id>
+    (see cancel_render) and polling stops with
+    {'ok': False, 'cancelled': True, 'error': 'cancelled by caller'}.
+    Use it to abort a long wait (e.g. user pressed Ctrl-C / a timeout hit)
+    while the job is still in the server queue.
+
     Returns {'ok': True, 'bytes': N, 'path': out_path} on success, else
-    {'ok': False, 'error': ...}.
+    {'ok': False, 'error': ...} (plus 'cancelled': True when cancelled).
     """
     import base64
     import time
@@ -1541,6 +1582,14 @@ def fetch_render(host: str, port: int, request_id: int, out_path: str,
         time.sleep(initial_wait)
     last_status = None
     for _ in range(tries):
+        if cancel_cb is not None:
+            try:
+                if cancel_cb():
+                    cr = cancel_render(host, port, request_id)
+                    return {"ok": False, "cancelled": True,
+                            "error": f"cancelled by caller ({cr.get('status', '?')})"}
+            except Exception:
+                pass  # a failing cancel probe must not wedge the poll loop
         try:
             conn = http.client.HTTPConnection(host, port, timeout=5)
             conn.request("GET", f"/result/{request_id}")
