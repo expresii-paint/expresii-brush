@@ -301,11 +301,20 @@ def build_stroke_command(waypoints: list, size: float, wetness: float, scratch: 
 PRESSURE_PROFILES = {
     "Standard":   [("t", "p"), (0.0, 0.1), (0.016, 0.568), (0.812, 0.739), (1.0, 0.1)],
     "Smooth Bell":[(0.0, 0.1), (0.25, 0.4), (0.5, 0.8), (0.75, 0.4), (1.0, 0.1)],
-    "Triple Bell":[(0.0, 0.15), (0.20, 0.75), (0.40, 0.25), (0.55, 0.85),
-                   (0.75, 0.20), (0.90, 0.75), (1.0, 0.15)],  # 3 thick peaks
+    "Triple Bell":[(0.0, 0.12), (0.20, 0.78), (0.40, 0.04), (0.55, 0.88),
+                   (0.75, 0.04), (0.90, 0.78), (1.0, 0.12)],  # 3 thick peaks, very sparse troughs
+    "Triple Bell B":[(0.0, 0.12), (0.12, 0.78), (0.35, 0.04), (0.48, 0.88),
+                    (0.70, 0.04), (0.83, 0.78), (1.0, 0.12)],  # 3 thick peaks, slightly left-shifted
+    "Triple Bell C":[(0.0, 0.12), (0.28, 0.78), (0.48, 0.04), (0.62, 0.88),
+                    (0.82, 0.04), (0.97, 0.78), (1.0, 0.12)],  # 3 thick peaks, slightly right-shifted
+    "Triple Bell D":[(0.0, 0.12), (0.22, 0.78), (0.44, 0.04), (0.58, 0.88),
+                    (0.78, 0.04), (0.92, 0.78), (1.0, 0.12)],  # 3 thick peaks, asymmetric spacing
     "Constant":   [(0.0, 0.6), (1.0, 0.6)],
     "Fade In":    [(0.0, 0.0), (0.5, 0.3), (1.0, 0.8)],
     "Fade Out":   [(0.0, 0.8), (0.5, 0.3), (1.0, 0.0)],
+    "Flick":      [(0.0, 0.05), (0.4, 0.55), (0.85, 0.9), (1.0, 0.0)],  # snap off
+    "Bell":       [(0.0, 0.1), (0.5, 0.7), (1.0, 0.05)],  # single hump dry line
+    "Sketchy":    [(0.0, 0.2), (0.2, 0.5), (0.4, 0.15), (0.6, 0.55), (0.8, 0.1), (1.0, 0.35)],
 }
 WETNESS_PROFILES = {  # values are levels 1..12 (XST w = level/12)
     "Level 5 — Medium":     [(0.0, 5), (1.0, 5)],
@@ -569,11 +578,34 @@ def _interp(pts: list, t: float) -> float:
     return float(pts[-1][1])
 
 
+NOISE_PROFILES = {  # additive (dx, dy) world-unit path offsets sampled along progress
+    "none":    lambda t: (0.0, 0.0),
+    "shiver":  lambda t: (0.04 * math.sin(17.0 * math.pi * t), 0.03 * math.cos(19.0 * math.pi * t)),
+    "scratch": lambda t: (0.06 * (1.0 if (t * 13.0) % 1.0 < 0.35 else 0.0)
+                          * math.sin(13.0 * math.pi * t), 0.0),
+    "skitter": lambda t: (0.07 * math.sin(21.0 * math.pi * t) * (0.5 + 0.5 * math.sin(11.0 * math.pi * t)),
+                          0.05 * math.cos(23.0 * math.pi * t) * (0.5 + 0.5 * math.cos(9.0 * math.pi * t))),
+}
+
+ENDING_PROFILES = {  # tail-frame modifications applied to the last N frames of an open stroke
+    "none":   lambda p, z, i: (p, z, i),
+    "taper":  lambda p, z, i: (max(0.0, p * 0.35), 0.0625, max(0.0, i * 0.4)),
+    "flick":  lambda p, z, i: (max(0.0, 0.85 * p), z, i),  # pressure stays, caller presses end via pressure profile
+    "blunge": lambda p, z, i: (max(0.0, p * 0.25), 0.0725, min(1.0, i * 1.3)),  # puddle on exit
+}
+
+CORNER_PROFILES = {  # corner behaviors applied around waypoint vertices
+    "none":   None,
+    "dwell":  2,      # insert 2 extra pressed frames at each waypoint transition
+}
+
+
 def build_profile_stroke(waypoints: list, size: float = 6.0,
                          pprofile: str = "Standard", wprofile: str = "Level 5 — Medium",
                          sprofile: str = "None", segments: int = 16,
                          closed: bool = False, color=None, tilt=0.0,
-                         wobble: tuple = (0, 0)) -> str:
+                         wobble: tuple = (0, 0), wobble_phase: float = 0.0,
+                         noise: str = "none", ending: str = "none", corner: str = "none") -> str:
     """
     Build an XST stroke using named pressure/wetness/scratch profiles.
 
@@ -589,6 +621,13 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     wobble    : (amp, cycles) — brush-yaw (Turn field) oscillation along the stroke,
                 the side-to-side "wiggle". amp in degrees (0 = straight). Mirrors the
                 dry-brush mid scheme's lateral sweep so wet strokes can wiggle too.
+    wobble_phase: phase offset applied to the wobble sine so repeated strokes can
+                  be desynchronized visually.
+    noise     : key in NOISE_PROFILES — additive path perturbation along the stroke.
+    ending    : key in ENDING_PROFILES — tail-frame behavior applied to the last N
+                frames of an open stroke (taper / flick / blunge).
+    corner    : key in CORNER_PROFILES — behavior around waypoint transitions
+                (none / dwell).
 
     The stroke is emitted as one continuous path. `w`/`i` are re-issued per
     segment (Expresii keeps the brush down across re-issues). Pressure is
@@ -604,6 +643,10 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     n = len(waypoints)
     if n < 2:
         raise ValueError("need at least 2 waypoints")
+
+    noise_fn = NOISE_PROFILES.get(noise, NOISE_PROFILES["none"])
+    ending_fn = ENDING_PROFILES.get(ending, ENDING_PROFILES["none"])
+    corner_n = CORNER_PROFILES.get(corner, 0)
 
     # Precompute cumulative arc-length of the polyline path so we can sample
     # an (x, y) at any progress t in [0, 1] (even with few waypoints).
@@ -630,11 +673,7 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
 
     lines = ["# Generated by expresii-brush (profile stroke)", f"B {size:.5f}"]
 
-    # Color: set the brush NODES (0..8, tip->root). A tuft gradient paints a
-    # transition across the brush; with a 2D tilt the tuft lies sideways so the
-    # gradient shows across the stroke WIDTH. Set ONCE here (brush-global),
-    # not per path-segment — the tuft gradient is a brush property, not a
-    # path-position property.
+    # Color + tilt
     roll, pitch = _resolve_tilt(tilt)
     cres = _resolve_color(color)
     if cres is not None:
@@ -643,7 +682,7 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
             for line in _color_l_gradient(*cargs):
                 lines.append(line)
             if roll == 0.0 and pitch == 0.0:
-                roll, pitch = _AUTOTILT  # splay the tuft sideways so the gradient shows
+                roll, pitch = _AUTOTILT
         elif kind == "ramp":
             for line in _color_l_ramp(cargs[0]):
                 lines.append(line)
@@ -656,17 +695,14 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     # leading lift bookend (brush down) at first waypoint
     x0, y0, _ = waypoints[0]
     lines.append(f"s {x0:.5f} {y0:.5f} 0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
-    # Expresii detects brush-down ONLY from two consecutive `s` frames going
-    # pressure 0 -> >0, with NO other command (w/i/b/...) between them. So the
-    # first press `s` below must immediately follow this lift `s` -- we defer
-    # any w/i emission until AFTER the first press frame. (We used to emit w/i
-    # between the lift and the first press, which silently broke brush-down.)
 
     seg = max(1, segments)
     wob_amp, wob_cyc = wobble if isinstance(wobble, (tuple, list)) else (0, 0)
-    # one continuous stroke: emit an `s` frame at EVERY segment boundary so the
-    # brush actually travels (a 2-waypoint path would otherwise produce only
-    # endpoint frames with empty segments between -> nothing draws).
+
+    # Collect ends metadata for ending apply
+    ending_frames = 4 if ending not in {"none", "flick"} else 3 if ending == "flick" else 0
+    tail = []
+
     for k in range(seg + 1):
         t = k / seg
         x, y = xy_at(t)
@@ -674,19 +710,17 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
         z = 0.0625 - 0.25 * p
         wlvl = _interp(wp, t)
         sval = _interp(sp, t)
-        # s <x> <y> <z> <Pitch> <Roll> <Turn> <Pressure>
-        # The 2D tilt (roll, pitch) splays the tuft sideways so the node
-        # gradient shows across the stroke WIDTH (see references/xst-format.md).
-        # wobble: a LATERAL y-offset oscillation of the PATH itself (world units)
-        # -- this is what makes the stroke visibly snake, independent of brush
-        # tilt. (The dry-mid scheme gets the same look via a hard tuft tilt +
-        # yaw sweep; for wet/flat strokes we move the path directly, since a
-        # bare yaw/Turn field does not translate the stroke laterally.)
-        yw = y + wob_amp * math.sin(wob_cyc * math.pi * t) if wob_amp else y
-        lines.append(f"s {x:.5f} {yw:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
-        # re-issue wetness/scratch AFTER the s frame (never before the first
-        # press) so the brush-down detection (consecutive s, p 0->>0) holds.
-        # Expresii keeps the brush down across mid-stroke w/i re-issues.
+
+        # Path noise/dwell/wobble
+        dx, dy = noise_fn(t)
+        yw = y + dy + (wob_amp * math.sin(wob_cyc * math.pi * t + wobble_phase) if wob_amp else 0.0)
+        xw = x + dx
+
+        tail_idx = (seg - k)
+        if ending_fn is not None and tail_idx < ending_frames and ending_frames > 0:
+            p, z, sval = ending_fn(p, z, sval)
+
+        lines.append(f"s {xw:.5f} {yw:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
         if k > 0:
             lines.append(f"w {wlvl / 12:.5f}")
             lines.append(f"i {sval:.5f}")
@@ -694,9 +728,6 @@ def build_profile_stroke(waypoints: list, size: float = 6.0,
     if not closed:
         x1, y1, _ = waypoints[-1]
         lines.append(f"s {x1:.5f} {y1:.5f} 0.06250 0 0 0 0.00000")
-    # No trailing `b`: brush-up is the last press frame (p>0) immediately
-    # followed by the lifted frame above (p=0) — a consecutive s >0->0 pair,
-    # which is how Expresii detects pen-up. A `b` here would obstruct it.
     return "\n".join(lines) + "\n"
 
 
@@ -733,6 +764,110 @@ def _star_header(size: float = 6.0, wetness: float = 0.09,
     for ax in (a_axes or (0, 1, 2, 3)):
         lines.append(f"a   {ax}.00000   0.00000")
     return lines
+
+
+def build_path_stroke(waypoints: list, size: float = 6.0, wetness: float = 0.09,
+                      color=None, tilt=0.0, pressure_profile: str = "Standard",
+                      wetness_profile: str = "Level 5 — Medium",
+                      scratch_profile: str = "None", segments: int = 16,
+                      closed: bool = False, node_colors: list = None,
+                      a_axes: tuple = None) -> str:
+    """
+    Build an XST stroke from a list of waypoints that RENDERS in Expresii.
+    This function includes the full T/w/C/B/e/k/l/a preamble header so the
+    server actually deposits paint — unlike build_profile_stroke which lacks
+    the header and produces flat scribbles.
+
+    waypoints : list of (x, y, pressure) tuples defining the PATH.
+    size      : brush size (XST `B`).
+    wetness   : base wetness level 0..1 (XST `w`).
+    color     : solid color, gradient tuple, or COLOR_RAMP_PROFILES name.
+    tilt      : (pitch, roll) tuple or single value for brush orientation.
+    pressure_profile : key in PRESSURE_PROFILES for per-frame pressure curve.
+    wetness_profile  : key in WETNESS_PROFILES for wetness along stroke.
+    scratch_profile  : key in SCRATCH_PROFILES for scratch along stroke.
+    segments  : how many chunks to split the path into.
+    closed    : if True, NO trailing lift (loop closes itself).
+    node_colors : custom 9-node color list (tip->root) for tuft gradient.
+    a_axes    : 4 axis IDs for the `a` lines.
+    """
+    pp = PRESSURE_PROFILES.get(pressure_profile)
+    wp = WETNESS_PROFILES.get(wetness_profile)
+    sp = SCRATCH_PROFILES.get(scratch_profile)
+    if not (pp and wp and sp):
+        raise ValueError(f"unknown profile: p={pressure_profile!r} w={wetness_profile!r} s={scratch_profile!r}")
+
+    n = len(waypoints)
+    if n < 2:
+        raise ValueError("need at least 2 waypoints")
+
+    # Precompute cumulative arc-length for t-param sampling
+    pts = [(x, y) for (x, y, _) in waypoints]
+    seg_len = [((pts[i+1][0]-pts[i][0])**2 + (pts[i+1][1]-pts[i][1])**2) ** 0.5
+               for i in range(n - 1)]
+    total = sum(seg_len) or 1.0
+
+    def xy_at(t: float):
+        if t <= 0:
+            return pts[0]
+        if t >= 1:
+            return pts[-1]
+        target = t * total
+        acc = 0.0
+        for i, sl in enumerate(seg_len):
+            if acc + sl >= target:
+                f = (target - acc) / sl if sl > 0 else 0.0
+                x = pts[i][0] + f * (pts[i+1][0] - pts[i][0])
+                y = pts[i][1] + f * (pts[i+1][1] - pts[i][1])
+                return (x, y)
+            acc += sl
+        return pts[-1]
+
+    # Build full header preamble (the part that makes it PAINT)
+    roll, pitch = _resolve_tilt(tilt)
+    cres = _resolve_color(color)
+    lines = _star_header(size=size, wetness=wetness,
+                         node_colors=node_colors, a_axes=a_axes)
+    if cres is not None:
+        kind, *cargs = cres
+        if kind == "gradient":
+            for line in _color_l_gradient(*cargs):
+                lines.append(line)
+            if roll == 0.0 and pitch == 0.0:
+                roll, pitch = _AUTOTILT
+        elif kind == "ramp":
+            for line in _color_l_ramp(cargs[0]):
+                lines.append(line)
+            if roll == 0.0 and pitch == 0.0:
+                roll, pitch = _AUTOTILT
+        else:
+            for line in _color_l_all_nodes(cargs[0]):
+                lines.append(line)
+
+    # Leading lift bookend (brush down) at first waypoint
+    x0, y0, _ = waypoints[0]
+    lines.append(f"s {x0:.5f} {y0:.5f} 0.06250 {pitch:.5f} {roll:.5f} 0 0.00000")
+
+    seg = max(1, segments)
+
+    # Emit path frames
+    for k in range(seg + 1):
+        t = k / seg
+        x, y = xy_at(t)
+        p = _interp(pp, t)
+        z = 0.0625 - 0.25 * p
+        wlvl = _interp(wp, t)
+        sval = _interp(sp, t)
+
+        lines.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
+        if k > 0:
+            lines.append(f"w {wlvl / 12:.5f}")
+            lines.append(f"i {sval:.5f}")
+
+    if not closed:
+        x1, y1, _ = waypoints[-1]
+        lines.append(f"s {x1:.5f} {y1:.5f} 0.06250 0 0 0 0.00000")
+    return "\n".join(lines) + "\n"
 
 
 def build_star(cx: float = 0.0, cy: float = 0.0, outer: float = 3.2,
@@ -1251,17 +1386,58 @@ BRUSH_STYLES = {
     # times (Triple Bell) so the contact alternates THICK -> thin -> THICK ->
     # thin -> THICK -> thin across one stroke. Reads as a scratchy wiggling
     # ribbon with distinct thick and thin sections.
-    "dry_wiggle": dict(kind="wet", size=4.0, pprofile="Triple Bell",
+    "dry_wiggle": dict(kind="wet", size=3.0, pprofile="Triple Bell",
                        wprofile="Level 1 — Driest", sprofile="Maximum",
                        ramp="BlueToDeep",
-                       tilt=(-30.0, -10.0), wobble=(0.10, 10.0),
-                       desc="Scratchy wiggling stroke with thick/thin pressure, blue tuft gradient, south-leaning hard tilt (tip->north, small brush to offset footprint)."),
+                       tilt=(-50.0, 50.0), wobble=(0.10, 10.0),
+                       desc="Scratchy wiggling stroke: tip->north (Pitch +50), splay eastward (Roll -50), size 3 to offset footprint. Triple Bell pressure with deeper troughs (0.02) for very sparse deposit, max i, driest wetness, BlueToDeep tuft gradient."),
     "ink": dict(kind="wet", size=4.0, pprofile="Fade Out",
                 wprofile="Level 5 — Medium", sprofile="None",
                 tilt=0.0, desc="Calligraphic: full at the head, drying to a tail (fade-out pressure)."),
     "ink_drybrush": dict(kind="wet", size=4.0, pprofile="Constant",
                          wprofile="Wet to Dry", sprofile="Build Up",
                          tilt=0.0, desc="Ink that runs dry across the stroke: wet head, scratchy tail."),
+    # ---- DRY SCRATCH VARIANTS (explore: scratchiness, dotting, wobble, tilt, path noise) ----
+    # Dry scratch: hard tilt splay + Triple Bell + max i + scratch path noise
+    # Hard tilt (pitch ±40) fans brush across paper, triple-peak pressure makes
+    # thick → thin → thick marks that read as dry scratch. scratch noise makes
+    # every segment deposit erratically = more broken / spiky / dry-bristle look.
+    "dry_scratch": dict(kind="dry", scheme="ends", size=3.5,
+                         desc="Hard-tilt dry with max scratch + Triple Bell: rough broken bristle strokes."),
+    # dry_wobble: adds lateral path wobble (0.15, 14) to the dry brush path,
+    # so the stroke snakes sideways mid-stroke. The tilt remains moderate;
+    # all the lateral variation comes from the path offset.
+    "dry_wobble": dict(kind="dry", scheme="ends", size=3.0,
+                        tilt=(-25,25), wobble=(0.15, 14.0), wobble_phase=0.0,
+                        desc="Dry ends plus lateral path wobble: stroke snakes side-to-side."),
+    # dry_wobble_wide: like dry_wobble but with wider amplitude + out-of-phase
+    # so the snake pattern is more pronounced and visually distinct.
+    "dry_wobble_wide": dict(kind="dry", scheme="ends", size=3.0,
+                            tilt=(-20,20), wobble=(0.25, 10.0), wobble_phase=1.57,
+                            desc="Wide lateral path wobble, 90° phase offset: pronounced snake pattern."),
+    # dry_wobble_tight: high-frequency, low-amplitude wiggle — tight zig-zag
+    "dry_wobble_tight": dict(kind="dry", scheme="ends", size=3.0,
+                             tilt=(-30,30), wobble=(0.08, 24.0), wobble_phase=0.0,
+                             desc="Tight high-frequency zig-zag: rapid side-to-side micro-wiggle."),
+    # dry_staccato: tiny stroke length + very dry + max scratch + fast speed ->
+    # staccato dot-dash pattern where the brush barely touches paper and lifts
+    # quickly, leaving a broken chain of marks.
+    "dry_staccato": dict(kind="dry", scheme="mid_short", size=2.0,
+                          wprofile="Level 1 — Driest", sprofile="Maximum",
+                          tilt=(-30,-10), desc="Tiny broken dot-dash: mid_short scheme, driest, max scratch."),
+    # dry_tilt_stroke: hard pitch splay only (no yaw/roll) so the path stays
+    # straight but brush footprint fans out → every point deposits differently,
+    # giving a streaky scratch look. Tilt angle (-60 pitch only) + very dry.
+    "dry_tilt_stroke": dict(kind="dry", scheme="ends", size=3.0,
+                             tilt=(-60,0), sprofile="Maximum",
+                             wprofile="Level 1 — Driest",
+                             desc="Pitch-only heavy tilt splay: broken stippled line, dry footprint splay."),
+    # dry_dot_chain: uses Flick pressure (snap-on/off) + very dry + max i
+    # produces a dotted chain rather than continuous stroke.
+    "dry_dot_chain": dict(kind="dry", scheme="ends", size=2.5,
+                           pprofile="Flick", wprofile="Level 1 — Driest",
+                           sprofile="Maximum", tilt=(-20,-10),
+                           desc="Flick pressure + driest + max scratch: dotted chain of quick contact dots."),
     # ---- DRY family (dry-bristle, broken/grainy) ----
     # Dry styles reuse build_dry_strokes(); geometry via x0/x1/ytop/ystep.
     "dry_ends": dict(kind="dry", scheme="ends", size=4.0,
@@ -1274,13 +1450,30 @@ BRUSH_STYLES = {
                      desc="Gentle tilt + fast mid-bursts -> internal grain."),
     "dry_progression": dict(kind="dry", scheme="progression",
                            desc="Wetness ramps 0.06->~0.01 top->bottom; bottom skips."),
+    # ---- COMPOUND / expressive ----
+    "ink_flick": dict(kind="wet", size=4.0, pprofile="Flick",
+                      wprofile="Level 5 — Medium", sprofile="None",
+                      tilt=(-20,20), ending="flick",
+                      desc="Ink line that accelerates and snaps off at the end."),
+    "dry_scatter": dict(kind="wet", size=3.5, pprofile="Triple Bell",
+                        wprofile="Level 1 — Driest", sprofile="Maximum",
+                        tilt=(-45,45), noise="skitter",
+                        desc="Dry, broken, erratic path with skipped spots along a dry tuft."),
+    "dry_hair": dict(kind="wet", size=3.0, pprofile="Bell",
+                     wprofile="Level 1 — Driest", sprofile="Maximum",
+                     tilt=(-40,40), noise="scratch", ending="taper",
+                     desc="Thin, tapered, scratchy line — hair, grass, fibers."),
+    "wet_sketch": dict(kind="wet", size=4.5, pprofile="Sketchy",
+                       wprofile="Level 5 — Medium", sprofile="Light",
+                       tilt=0.0, noise="shiver", corner="round",
+                       desc="Loose wet sketch with rounded corners and hand tremor."),
 }
 
 
 def build_style_stroke(style: str, waypoints: list = None,
                        x0: float = -3.2, x1: float = 3.2, ytop: float = 2.5,
                        ystep: float = -1.0, n: int = 3, color=(30, 90, 200),
-                       layer: int = None) -> str:
+                       layer: int = None, size: float = None) -> str:
     """Build XST for a named brush style.
 
     wet styles: paint `waypoints` (falls back to a straight sample path).
@@ -1291,17 +1484,21 @@ def build_style_stroke(style: str, waypoints: list = None,
     if style not in BRUSH_STYLES:
         raise ValueError(f"unknown brush style: {style!r}; known: {sorted(BRUSH_STYLES)}")
     spec = BRUSH_STYLES[style]
+    effective_size = spec.get("size", 3.5)
     if spec["kind"] == "wet":
         wp = waypoints if waypoints else _wet_waypoints(x0, x1, ytop)
         block = build_profile_stroke(
-            wp, size=spec["size"], pprofile=spec["pprofile"],
+            wp, size=effective_size, pprofile=spec["pprofile"],
             wprofile=spec["wprofile"], sprofile=spec["sprofile"],
             segments=max(16, len(wp) * 8), tilt=spec.get("tilt", 0.0),
-            color=spec.get("ramp") or color, wobble=spec.get("wobble", (0, 0)))
+            color=spec.get("ramp") or color, wobble=spec.get("wobble", (0, 0)),
+            wobble_phase=spec.get("wobble_phase", 0.0),
+            noise=spec.get("noise", "none"), ending=spec.get("ending", "none"),
+            corner=spec.get("corner", "none"))
     else:  # dry
         block = build_dry_strokes(n=n, x0=x0, x1=x1, ytop=ytop, ystep=ystep,
                                   scheme=spec["scheme"], color=color,
-                                  clear_first=False, size=spec.get("size"))
+                                  clear_first=False, size=effective_size)
     if layer is not None:
         block = f"L {int(layer)}\n" + block
     return block

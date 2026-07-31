@@ -25,6 +25,7 @@ from send_strokes import (  # noqa: E402
     COLOR_PROFILES,
     COLOR_RAMP_PROFILES,
     STROKE_LIBRARY,
+    BRUSH_STYLES,
     _interp,
     parse_color,
     _hsl_to_rgb,
@@ -45,9 +46,21 @@ from send_strokes import (  # noqa: E402
 # ── Catalog ────────────────────────────────────────────────────────────────
 
 def test_profile_catalogs_loaded():
-    assert len(PRESSURE_PROFILES) == 5
-    assert len(WETNESS_PROFILES) == 6
-    assert len(SCRATCH_PROFILES) == 8
+    # Invariant: every BRUSH_STYLE references profiles that actually exist in
+    # the catalogs (a style that references a missing profile would crash at
+    # build time). NOT a snapshot of catalog sizes — catalogs grow over time.
+    for name, spec in BRUSH_STYLES.items():
+        if "pprofile" in spec:
+            assert spec["pprofile"] in PRESSURE_PROFILES, f"{name}: pprofile {spec['pprofile']!r}"
+        if "wprofile" in spec:
+            assert spec["wprofile"] in WETNESS_PROFILES, f"{name}: wprofile {spec['wprofile']!r}"
+        if "sprofile" in spec:
+            assert spec["sprofile"] in SCRATCH_PROFILES, f"{name}: sprofile {spec['sprofile']!r}"
+    # sanity: each catalog non-empty and carries the profiles the library leans on
+    assert "Standard" in PRESSURE_PROFILES
+    assert "Smooth Bell" in PRESSURE_PROFILES
+    assert "Level 2 — Dry" in WETNESS_PROFILES
+    assert "None" in SCRATCH_PROFILES
 
 
 def test_interp_endpoints_and_mid():
@@ -83,8 +96,11 @@ def test_build_up_scratch_ramps_zero_to_one():
         pprofile="Constant", wprofile="Level 5 — Medium", sprofile="Build Up", segments=8,
     )
     iscr = [float(l.split()[1]) for l in stroke.split("\n") if l.startswith("i ")]
-    assert abs(iscr[0]) < 1e-6
-    assert abs(iscr[-1] - 1.0) < 1e-6
+    # w/i are re-issued after each press frame (k>=1), so the first sample is at
+    # t=1/segments, not t=0. The Build Up profile ramps 0 -> 1 across the path.
+    assert iscr[0] < 0.2  # starts near 0 (first sample at t=1/8)
+    assert abs(iscr[-1] - 1.0) < 1e-6  # ends at full scratch
+    assert all(iscr[i] <= iscr[i + 1] + 1e-9 for i in range(len(iscr) - 1))  # monotonic
 
 
 # ── Bookend rules ─────────────────────────────────────────────────────────
@@ -150,9 +166,10 @@ def test_wet_to_dry_ramps_along_path():
         pprofile="Constant", wprofile="Wet to Dry", sprofile="None", segments=8,
     )
     ws = [float(l.split()[1]) for l in xst.split("\n") if l.startswith("w ")]
-    # Wet to Dry: starts wet (~1.0) ends dry (~0.083)
-    assert ws[0] > 0.9
+    # Wet to Dry: starts wet (~1.0 at t=0, first sample t=1/8 ~ 0.885) ends dry (~0.083)
+    assert ws[0] > 0.8
     assert ws[-1] < 0.15
+    assert all(ws[i] >= ws[i + 1] - 1e-9 for i in range(len(ws) - 1))  # monotonic down
 
 
 # ── Composite joining ─────────────────────────────────────────────────────
@@ -305,8 +322,12 @@ def test_circle_tilt_splays_both_axes():
 
 def test_build_dab_emits_b_sandwich_and_splays_direction():
     d = build_dab((0.10, 0.41), direction="W", tilt_deg=72, color="Cobalt:Vermilion")
-    assert d.count("b ") == 2  # pen-down + pen-up markers
-    assert " 0.06250 0.00000 72.00000 0 0.00000" in d  # lifted West splay (Roll=+72)
+    # No `b` markers: brush-down is the lifted posture frame (p=0) immediately
+    # followed by the first press frame (p>0) — consecutive s, no command between
+    # (a `b` would obstruct the mark).
+    assert d.count("b ") == 0
+    # lifted posture frame opens the dab, splayed West (Roll=+72)
+    assert " 0.06250 0.00000 72.00000 0 0.00000" in d
     assert d.count("\nl ") == 9  # tuft gradient nodes
     # pressure pulse present (some frame at peak pressure)
     assert " 0.00000 72.00000 0 0.75000" in d
@@ -319,8 +340,17 @@ def test_four_dab_composite_matches_sample_directions():
         build_dab((0.18, 0.44), direction="W", tilt_deg=72),  # more tilt -> more root/red
         build_dab((0.10, 0.43), direction="S", tilt_deg=67),
     ])
-    # 2 b-markers per dab
-    assert four.count("b ") == 8
+    # No b-markers (dropped; see test_build_dab_emits_b_sandwich_and_splays_direction).
+    # Each dab's directional splay (Roll/Pitch) must survive the composite join.
+    assert four.count("b ") == 0
     assert "-54.00000" in four and "57.00000" in four and "72.00000" in four and "-67.00000" in four
+    # brush-down invariant per dab: a lift frame (p=0) directly followed by a
+    # press frame (p>0) with no intervening command line
+    frames = [l for l in four.splitlines() if l.startswith("s ")]
+    downs = sum(
+        1 for i in range(len(frames) - 1)
+        if frames[i].split()[-1] == "0.00000" and float(frames[i + 1].split()[-1]) > 0
+    )
+    assert downs >= 4, downs
 
 
