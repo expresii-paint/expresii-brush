@@ -1317,6 +1317,145 @@ def clear_canvas() -> str:
     return "c\n"
 
 
+# ── Height-tapered dry-mid path tracing (ported from the silhouette demo) ──
+# Recipe origin: draw_suzanne.py `_dry_mid_stroke` (verified 2026-08-01 on the
+# v2026.07.26 build). The user-corrected dry recipe: w 0.45 is NOT dry —
+# scratchiness = f(i, w, pressure, SPEED). Tuning notes that made v5 work:
+#   * z calibration DECODED from the current build: z_lift 0.021875,
+#     zcoup 0.154167 (contact at p~0.14). The old 0.0875/0.165 calibration
+#     left 62% of frames hovering on this build (v3: 38% path coverage).
+#   * w 0.04: dry but still depositing (w 0.004 was near-invisible; w 0.45
+#     reads as wet).
+#   * HEIGHT TAPER (the v4->v5 fix): yaw/roll amplitude and speed-burst
+#     strength scale by global height (full 飞白 at top -> ~0.45x at bottom)
+#     and the pressure floor rises toward the bottom, so lower strokes
+#     deposit visibly instead of being over-scratched into nothing.
+#     v5 numbers: bottom coverage 79.2% -> 96.9%, gaps 38 -> 22.
+
+def build_dry_path_stroke(waypoints: list, size: float = 3.0,
+                          color=None, wetness: float = 0.04,
+                          scratch: float = 1.0, tilt=(-50.0, -15.0),
+                          z_lift: float = 0.021875, zcoup: float = 0.154167,
+                          peak: float = 0.70, floor: float = 0.45,
+                          yaw_amp: float = 0.70, yaw_cycles: float = 14.0,
+                          roll_amp: float = 14.0,
+                          speed_mult: float = 3.0,
+                          base_step: float = 0.05,
+                          first_press_z: float = 0.02944,
+                          first_press_p: float = 0.26448,
+                          taper: bool = True,
+                          closed: bool = False,
+                          layer: int = None) -> str:
+    """Trace a polyline path with the verified dry-mid (飞白) recipe.
+
+    This is the height-tapered dry-brush stroke from the Suzanne silhouette
+    work (draw_suzanne.py), generalized from horizontal lines to ANY path.
+    Unlike `build_profile_stroke` (a wet recipe), this emits a dry stroke:
+    max scratch, near-zero wetness, 2-lift brush-down + hardcoded first press,
+    speed-burst arc-length sampling, and a yaw/roll tuft sweep while pressed
+    = broken, grainy tracks that feather at the ends.
+
+    waypoints : list of (x, y) path points (Expresii space; caller handles
+                any Y-inversion from source coords).
+    taper     : height-taper the scratchiness (full 飞白 at the TOP of the
+                drawing -> ~0.45x at the bottom) and raise the pressure floor
+                toward the bottom so lower strokes deposit. Disable for a
+                uniform-scratch stroke.
+    closed    : if True, trace back to the start (loop); else open stroke.
+    layer     : if not None, prepend `L <layer>`.
+
+    Returns a ready-to-send XST block (header + frames, no `c`).
+    """
+    pts = list(waypoints)
+    if len(pts) < 2:
+        raise ValueError("need at least 2 waypoints")
+    if closed and pts[0] != pts[-1]:
+        pts = pts + [pts[0]]
+
+    pitch, roll0 = tilt
+    L = []
+    # header: T/w/C/B/e/k + color nodes + axes (matching the recorded format)
+    lines = [
+        "T   0.00000",
+        f"w   {wetness:.5f}",
+        "C   4.00000",
+        f"B   {size:.5f}",
+        "e   0.00000",
+        "k   0.00000",
+    ]
+    cres = _resolve_color(color)
+    if cres is not None:
+        kind, *cargs = cres
+        if kind == "gradient":
+            lines += _color_l_gradient(*cargs)
+        elif kind == "ramp":
+            lines += _color_l_ramp(cargs[0])
+        else:
+            lines += _color_l_all_nodes(cargs[0])
+    lines.append(f"i {scratch:.5f}")
+    for ax in (0, 1, 2, 3):
+        lines.append(f"a   {ax}.00000   0.00000")
+    L += lines
+
+    # arc-length table for sampling
+    arc = []
+    acc = 0.0
+    for i, (x, y) in enumerate(pts):
+        if i > 0:
+            acc += math.hypot(x - pts[i - 1][0], y - pts[i - 1][1])
+        arc.append((x, y, acc))
+    total = arc[-1][2] if arc else 1.0
+
+    def point_at(fx):
+        tgt = fx * total
+        for (x1, y1, s1), (x2, y2, s2) in zip(arc, arc[1:]):
+            if s1 <= tgt <= s2:
+                f = (tgt - s1) / max(s2 - s1, 1e-9)
+                return x1 + (x2 - x1) * f, y1 + (y2 - y1) * f
+        return arc[-1][0], arc[-1][1]
+
+    ymin_all = min(p[1] for p in pts)
+    ymax_all = max(p[1] for p in pts)
+    y_span = max(ymax_all - ymin_all, 1e-6)
+
+    # brush-down: two lift frames, then the hardcoded dry first press
+    x0, y0 = pts[0]
+    L.append(f"s {x0:.5f} {y0:.5f} {z_lift:.5f} {pitch:.5f} {roll0:.5f} 0 0.00000")
+    L.append(f"s {x0:.5f} {y0:.5f} {z_lift:.5f} {pitch:.5f} {roll0:.5f} 0 0.00000")
+    L.append(f"s {x0:.5f} {y0:.5f} {first_press_z:.5f} {pitch:.5f} {roll0:.5f} 0 {first_press_p:.5f}")
+
+    f = 0.0
+    last_w = None
+    while f < 1.0 - 1e-9:
+        _, y0p = point_at(f)
+        t = (y0p - ymin_all) / y_span          # 0 top -> 1 bottom (global)
+        scratch_f = (1.0 - 0.55 * t) if taper else 1.0
+        mult = 1.0 + (speed_mult - 1.0) * scratch_f   # bursts weaken downward
+        f2 = min(1.0, f + (base_step / total) / mult)
+        fx = (f + f2) / 2.0
+        x, y = point_at(fx)
+        floor_eff = (floor + (0.60 - floor) * t) if taper else floor
+        p = peak * (floor_eff + (1.0 - floor_eff) * math.sin(math.pi * fx))
+        z = z_lift - zcoup * p
+        yaw = yaw_amp * scratch_f * math.sin(yaw_cycles * math.pi * fx)
+        roll = roll0 + roll_amp * scratch_f * math.sin(yaw_cycles * math.pi * fx + 1.5)
+        if wetness != last_w:
+            L.append(f"w {wetness:.5f}")
+            last_w = wetness
+        L.append(f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} {yaw:.5f} {p:.5f}")
+        f = f2
+
+    # brush-up: two lift frames
+    x1, y1 = pts[-1]
+    L.append(f"s {x1:.5f} {y1:.5f} {z_lift:.5f} {pitch:.5f} {roll0:.5f} 0 0.00000")
+    L.append(f"s {x1:.5f} {y1:.5f} {z_lift:.5f} {pitch:.5f} {roll0:.5f} 0 0.00000")
+
+    block = "\n".join(L) + "\n"
+    if layer is not None:
+        block = f"L {int(layer)}\n" + block
+    return block
+
+
 def build_composite(strokes: list, clear_first: bool = True) -> str:
     """
     Combine several stroke blocks into ONE XST, ready to send.
@@ -1467,6 +1606,14 @@ BRUSH_STYLES = {
                        wprofile="Level 5 — Medium", sprofile="Light",
                        tilt=0.0, noise="shiver", corner="round",
                        desc="Loose wet sketch with rounded corners and hand tremor."),
+    # ---- PATH-TRACING DRY (dry tuft-sweep recipes that follow ANY path) ----
+    "dry_mid_path": dict(kind="dry_path",
+                         desc="Height-tapered 飞白 dry-mid tracing any waypoint path: "
+                              "max scratch, yaw/roll sweep, speed bursts; full dry-break "
+                              "at top tapering to visible deposit at bottom (silhouette v5 recipe)."),
+    "dry_mid_path_flat": dict(kind="dry_path", taper=False,
+                              desc="Uniform-scratch dry-mid path tracing (no height taper): "
+                                   "same broken grainy track everywhere along the path."),
 }
 
 
@@ -1479,6 +1626,8 @@ def build_style_stroke(style: str, waypoints: list = None,
     wet styles: paint `waypoints` (falls back to a straight sample path).
     dry styles: ignore waypoints; draw n horizontal dry strokes from
                 build_dry_strokes(x0,x1,ytop,ystep,n, scheme=...).
+    dry_path styles: trace `waypoints` with the height-tapered dry-mid recipe
+                (build_dry_path_stroke) — dry tuft-sweep that follows ANY path.
     layer: if not None, prepend `L <layer>`.
     """
     if style not in BRUSH_STYLES:
@@ -1495,7 +1644,15 @@ def build_style_stroke(style: str, waypoints: list = None,
             wobble_phase=spec.get("wobble_phase", 0.0),
             noise=spec.get("noise", "none"), ending=spec.get("ending", "none"),
             corner=spec.get("corner", "none"))
-    else:  # dry
+    elif spec["kind"] == "dry_path":
+        if waypoints:
+            wp = [(x, y) for (x, y, _) in waypoints]
+        else:
+            wp = [(x, y) for (x, y, _) in _wet_waypoints(x0, x1, ytop)]
+        block = build_dry_path_stroke(
+            wp, size=effective_size, color=color,
+            taper=spec.get("taper", True))
+    else:  # dry (horizontal)
         block = build_dry_strokes(n=n, x0=x0, x1=x1, ytop=ytop, ystep=ystep,
                                   scheme=spec["scheme"], color=color,
                                   clear_first=False, size=effective_size)

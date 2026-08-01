@@ -212,6 +212,13 @@ brush character. Two families:
 - **Dry** (`dry_ends`, `dry_mid`, `dry_mid_short`, `dry_speed`,
   `dry_progression`) — the dry-brush recipes; horizontal strokes (geometry
   via `--x0/--x1/--ytop/--ystep`), grainy/broken texture.
+- **Dry-path** (`dry_mid_path`, `dry_mid_path_flat`) — the height-tapered
+  飞白 (dry-brush fly-white) recipe generalized to ANY waypoint path via
+  `build_dry_path_stroke` (ported from the Suzanne silhouette work): max
+  scratch + near-zero wetness + yaw/roll tuft sweep + speed bursts, with
+  scratchiness tapering from full break at the top of the drawing to visible
+  deposit at the bottom (the v4→v5 fix: bottom coverage 79% → 97%).
+  `dry_mid_path` = tapered, `dry_mid_path_flat` = uniform scratch.
 
 Build one in Python:
 
@@ -221,6 +228,12 @@ from scripts.send_strokes import build_style_stroke
 xst = build_style_stroke("ink", waypoints=[(-2, 1, 0.0), (0, 0, 0.5), (2, -1, 0.8)])
 # dry: horizontal sample
 xst = build_style_stroke("dry_mid", x0=-3.2, x1=3.2, ytop=0.0, n=1)
+# dry-path: trace ANY polyline with the 飞白 recipe
+xst = build_style_stroke("dry_mid_path", waypoints=[(-2, -1, 0.5), (0, 1, 0.5), (2, -1, 0.5)])
+# or call the emitter directly (full control of the dry recipe params)
+from scripts.send_strokes import build_dry_path_stroke
+xst = build_dry_path_stroke([(-2, -1), (0, 1), (2, -1)], color=(30, 90, 200),
+                            closed=True, layer=1)  # L 1 prepended
 ```
 
 CLI:
@@ -234,7 +247,7 @@ python "$SKILL_DIR/scripts/send_strokes.py" --swatches --verify /tmp/swatches.pn
 
 `build_style_stroke(..., layer=N)` prepends `L <N>` so a style lands on a
 specific layer (see the `L` command above). Add your own by appending to
-`BRUSH_STYLES` (each entry: `dict(kind="wet"|"dry", ...)`).
+`BRUSH_STYLES` (each entry: `dict(kind="wet"|"dry"|"dry_path", ...)`).
 
 ## Pitfalls
 

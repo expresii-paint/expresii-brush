@@ -39,6 +39,8 @@ from send_strokes import (  # noqa: E402
     build_profile_stroke,
     build_dab,
     build_composite,
+    build_dry_path_stroke,
+    build_style_stroke,
     paint,
 )
 
@@ -352,6 +354,78 @@ def test_four_dab_composite_matches_sample_directions():
         if frames[i].split()[-1] == "0.00000" and float(frames[i + 1].split()[-1]) > 0
     )
     assert downs >= 4, downs
+
+
+# ── Height-tapered dry-mid path tracing (build_dry_path_stroke) ───────────
+
+def test_dry_path_stroke_brushdown_and_lifts():
+    xst = build_dry_path_stroke([(-2, -1), (2, 1)], color=(30, 90, 200))
+    sf = [l for l in xst.split("\n") if l.startswith("s ")]
+    # brush-down: 2 lift frames (p=0) then the hardcoded dry first press (p>0)
+    assert sf[0].split()[-1] == "0.00000"
+    assert sf[1].split()[-1] == "0.00000"
+    assert float(sf[2].split()[-1]) > 0.2
+    # brush-up: trailing 2 lifts
+    assert sf[-1].split()[-1] == "0.00000"
+    assert sf[-2].split()[-1] == "0.00000"
+    # no `b` markers, no `L` (no layer), starts with recorded header
+    assert xst.count("\nb ") == 0
+    assert not xst.startswith("L ")
+    assert xst.startswith("T   0.00000")
+
+
+def test_dry_path_stroke_height_taper_reduces_yaw_downward():
+    # The v4->v5 fix: yaw/roll amplitude scales by global height so the top
+    # keeps its 飞白 while the bottom deposits visibly. On a top->bottom
+    # diagonal, top frames must carry MORE yaw than bottom frames.
+    xst = build_dry_path_stroke([(-2, -1), (2, 1)], color=(30, 90, 200))
+    sf = [l for l in xst.split("\n") if l.startswith("s ")]
+    yaw = [abs(float(l.split()[6])) for l in sf]
+    y = [float(l.split()[2]) for l in sf]
+    top = [a for a, yy in zip(yaw, y) if yy < -0.9]
+    bot = [a for a, yy in zip(yaw, y) if yy > 0.9]
+    assert top and bot
+    assert sum(top) / len(top) > sum(bot) / len(bot)
+
+
+def test_dry_path_stroke_flat_has_uniform_scratch():
+    # taper=False keeps the yaw amplitude constant along the path. Compare the
+    # sine PEAK (max |yaw|) in the top vs bottom band — the average differs
+    # purely by sampling phase, but the envelope peak must match when flat.
+    xst = build_dry_path_stroke([(-2, -1), (2, 1)], color=(30, 90, 200), taper=False)
+    sf = [l for l in xst.split("\n") if l.startswith("s ")]
+    yaw = [abs(float(l.split()[6])) for l in sf]
+    y = [float(l.split()[2]) for l in sf]
+    top = [a for a, yy in zip(yaw, y) if yy < -0.9]
+    bot = [a for a, yy in zip(yaw, y) if yy > 0.9]
+    assert top and bot
+    # both reach the same envelope peak (scratch_f == 1.0 everywhere);
+    # allow float-quantization slack (yaw is formatted to 5 decimals)
+    assert abs(max(top) - max(bot)) < 0.001
+
+
+def test_dry_path_styles_dispatch_in_build_style_stroke():
+    # BRUSH_STYLES dry_path entries route through build_dry_path_stroke
+    for style in ("dry_mid_path", "dry_mid_path_flat"):
+        assert style in BRUSH_STYLES
+        assert BRUSH_STYLES[style]["kind"] == "dry_path"
+        block = build_style_stroke(style, waypoints=[(-2, -1, 1), (0, 1, 1), (2, -1, 1)])
+        sf = [l for l in block.split("\n") if l.startswith("s ")]
+        assert len(sf) > 10
+        # follows the path: frames span the waypoint x-range
+        xs = [float(l.split()[1]) for l in sf]
+        assert min(xs) <= -2.0 + 1e-6 and max(xs) >= 2.0 - 1e-6
+
+
+def test_dry_path_stroke_closed_loop():
+    xst = build_dry_path_stroke([(-1, 0), (0, 1), (1, 0), (0, -1)], closed=True,
+                                color=(30, 90, 200))
+    sf = [l for l in xst.split("\n") if l.startswith("s ")]
+    # first and last sampled positions should both sit on the closed loop
+    x_first, y_first = float(sf[2].split()[1]), float(sf[2].split()[2])
+    x_last, y_last = float(sf[-3].split()[1]), float(sf[-3].split()[2])
+    # the loop closes back to (-1, 0): last mid-frame is near the start
+    assert abs(x_last + 1.0) < 0.05 and abs(y_last) < 0.05
 
 
 # ── Cancel queued render (DELETE /cancel/<id>) ────────────────────────────
