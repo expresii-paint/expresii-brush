@@ -170,11 +170,38 @@ Typical dry-brush: `0.6`–`1.0`.
 i 0.5
 ```
 
+### `basecolor` — Paper background color (setup block)
+
+```text
+basecolor r g b
+```
+
+Sets the paper's base background color. `r`, `g`, `b` are RGB values in bytes
+(`0`–`255` each). **Place it in the setup block, before `# End of Setup`**, so it
+applies to the whole painting. Emit it once near the top of the file (after `c`
+if you also clear), not between strokes. Without `basecolor` the paper defaults
+to its normal white/transparent; use it when you want a colored ground (e.g. a
+toned paper or a colored backdrop behind transparent strokes).
+
+```text
+c
+basecolor 240 235 220     # warm paper tone for the whole painting
+B 4.00000
+w 0.50000
+...
+# End of Setup
+... stroke frames ...
+```
+
+> Newer Expresii feature (v0.8+); not in the original stroke-file spec
+> (`ExpresiiStrokeFileFormatDescription.txt` documents only `s c C B w l i`).
+> Documented here from the app's actual behavior.
+
 ## Coordinate system details
 
 - **Origin (0, 0, 0):** canvas center
 - **X axis:** right
-- **Y axis:** up
+- **Y axis:** up **(+Y up, Cartesian/SVG-aligned — since Expresii XST v0.8).** Pre-v0.8, +Y was down and strokes negated Y at emit; that flip is gone in v0.8+. Do NOT negate Y when authoring for v0.8+.
 - **Z axis:** out of the canvas toward the viewer (positive z = brush lifted, negative z = brush pressed in)
 - **Tuft base** is the geometric anchor of the brush, *not* the tip — the tip extends from the tuft in the direction of the brush's normal
 - **Pressure 0** = brush not touching canvas (z = +0.0625); **Pressure 1** = fully pressed (z = −0.0625)

@@ -75,6 +75,10 @@ Plain text, one command per line, `#` for comments, space-separated params. The 
 | `i` | `i <scratch>` | 0.0–1.0 | Set brush scratchiness (dry-brush texture) |
 | `l` | `l <node> <R> <G> <B>` | 0–255 | Set color at brush node (9 nodes: 0=tip, 8=root). Binds to the most recent `C` profile; omit `C` to use the currently-selected profile. |
 | `s` | `s <x> <y> <z> <tY> <tX> <barrel> <pressure>` | pressure 0–1 | One stroke frame |
+| `basecolor` | `basecolor <r> <g> <b>` | 0–255 each | **Paper background color.** Sets the canvas base color (RGB bytes). Put it in the **setup block, before `# End of Setup`** so it applies to the whole painting. Emit once at the top (after `c` if you also clear), not between strokes. |
+
+**Coordinate system (Expresii XST v0.8+):** `+Y is UP` (Cartesian / SVG-aligned) — the same direction as standard math and screen-Y-up. This changed at v0.8: pre-v0.8, +Y was down and strokes had to negate Y at emit. **Do NOT flip the Y sign when authoring for v0.8+** — emit your y directly. The helper and this skill assume v0.8+; if you are targeting an older Expresii, negate y in your emit. (Tilt-Y/Tilt-X signs are unchanged: Tilt-Y+ = North/up, Tilt-X− = East.)
+
 
 **The z-pressure coupling is load-bearing, not decorative.** Empirically derived from sample strokes:
 
