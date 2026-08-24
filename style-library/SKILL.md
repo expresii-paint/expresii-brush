@@ -16,13 +16,38 @@ metadata:
 
 Reusable stroke-style catalog and brush-down invariant for the `expresii-brush` skill. Companion to the `expresii-brush` skill; covers the style registry, noise/ending/corner axes, and dry scratch variants.
 
-## When to Use
+## Phased Stroke Model (per-phase wetness / tilt / gradient)
 
-- User asks to draw with a specific stroke look (scratchy, wiggly, dotted, tilted, etc.)
-- User wants to explore or extend the brush style catalog
-- User asks about brush tilt footprint, centroid shift, or paper coverage
-- User wants a 3×3 grid or other layout for style comparison renders
-- User asks to draw parametric/geometric shapes (cube wireframe, polygons, 3D-projected forms) — see `references/geometric-strokes.md` for the projection math and degenerate-view pitfall. **Coordinate convention (Expresii XST v0.8+): `+Y is UP` (Cartesian/SVG-aligned) — emit y directly, do NOT negate it at emit.** Pre-v0.8 needed a `-y` flip; that's gone. (Tilt-Y/Tilt-X signs: Tilt-Y+ = North/up, Tilt-X− = East — unchanged across versions.)
+A stroke is three phases — **beginning**, **mid**, **end** — each carrying its OWN
+wetness, tilt, gradient-loading, scratch, and pressure peak. This is the composable
+stroke model you asked for: *wet vs dry, tilt=0 vs tilt-to-side, gradient painting,
+and per-phase variations.* Implemented in `scripts/phased_stroke.py`
+(`build_phased_stroke`). Full detail + phase-config table + usage:
+`references/phased-strokes.md`.
+
+Quick example (dry+tilted → wet+flat → dry+tilted with a different gradient):
+
+```python
+from phased_stroke import build_phased_stroke
+xst = build_phased_stroke(
+    [(0.0, 0.0), (1.5, 0.3), (3.0, 0.0)], size=5.0,
+    begin={"wetness": 0.05, "tilt": (-50, -15),
+           "gradient": ((253, 208, 54), (255, 255, 255)), "scratch": 1.0},
+    mid={"wetness": 0.95, "tilt": 0.0, "gradient": ((30, 90, 200), (200, 40, 40))},
+    end={"wetness": 0.05, "tilt": (50, 15), "solid": (40, 40, 40), "scratch": 1.0},
+)
+```
+
+Phases re-issue `w`/`i`/`l`/tilt only at phase boundaries; the brush stays down
+(across re-issues) so the stroke is continuous, and the brush-down invariant
+(lift→press, nothing between) is preserved. `verify_xst.py` and the suite test
+(`tests/test_phased_stroke.py`) confirm both.
+
+**Coordinate convention (Expresii XST v0.8+):** `+Y is UP` (Cartesian/SVG-aligned)
+— emit y directly, do NOT negate it. Pre-v0.8 needed a `-y` flip; that's gone.
+(Tilt-Y/Tilt-X signs: Tilt-Y+ = North/up, Tilt-X− = East — unchanged.)
+
+
 
 ## Z-Pressure Coupling (authoritative, recorded v0.7)
 
@@ -64,9 +89,9 @@ For multi-stroke 3D projections (cube wireframe, landscapes from data series), *
 
 
 
-**Doc-vs-installed gap (hit 2026-07-31):** this skill's docs reference `build_style_stroke()`, `build_dry_strokes()`, `build_path_stroke()`, and the `BRUSH_STYLES` dict as living in `scripts/send_strokes.py` — but the INSTALLED `send_strokes.py` (in the `expresii-brush` skill dir) is the minimal helper (ping / send / --command / --stroke only) and contains none of them. The full builders likely live in the upstream repo (expresii-paint/expresii-brush), not the installed skill. Don't hunt for them on disk: compose raw XST from the recipe tables here, or check the repo clone.
+**Builders are real (2026-08-21 update):** the full builders — `build_style_stroke()`, `build_dry_strokes()`, `build_path_stroke()`, `build_dry_path_stroke()`, `build_profile_stroke()`, `build_circle()`, `build_star()`, `build_dab()`, `paint()`, and the `BRUSH_STYLES` dict (25 entries) — ALL live in the parent `scripts/send_strokes.py` in this repo (the `expresii-brush` clone). The older "minimal helper only" gap noted 2026-07-31 is resolved: the repo now ships the complete generator. Import from `scripts/send_strokes` (add the parent `scripts/` dir to `sys.path`) or call the `expresii-brush` skill's helper. The style-library's own `scripts/phased_stroke.py` is the per-phase composable builder built on top of those.
 
-The `BRUSH_STYLES` dict in `scripts/send_strokes.py` is the canonical catalog. Each entry maps a style name to a recipe dict:
+The `BRUSH_STYLES` dict in the parent `scripts/send_strokes.py` is the canonical catalog (25 entries as of 2026-08-21). Each entry maps a style name to a recipe dict:
 
 | Key | Description |
 |-----|-------------|

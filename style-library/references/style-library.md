@@ -2,7 +2,11 @@
 
 Full catalog of BRUSH_STYLES entries, valid profile keys, and grid layout conventions for the expresii-brush-style-library skill.
 
-## BRUSH_STYLES (23 entries, as of session 2026-07-29)
+## BRUSH_STYLES (25 entries, as of 2026-08-21)
+
+> Catalog lives in the parent `scripts/send_strokes.py`. This list mirrors it.
+> The 6 entries added after 2026-07-29: `ink_flick`, `dry_scatter`, `dry_hair`,
+> `wet_sketch`, `dry_mid_path`, `dry_mid_path_flat`.
 
 ### Wet family (11)
 - `wet_wash` — Constant pressure, Level 12 Wettest, smooth wash
@@ -19,6 +23,8 @@ Full catalog of BRUSH_STYLES entries, valid profile keys, and grid layout conven
 - `zigzag` — *(removed)* was: Sketchy + Level 3 Dry + Maximum + tilt(-40,40) + wobble + scratch
 - `tilt_dash` — *(removed)* was: Standard + Level 3 Dry + Maximum + tilt(-60,0)
 - `scratch_wave` — *(removed)* was: Triple Bell + Level 2 Dry + Maximum + wobble(0.22,18) + scratch
+- `ink_flick` — Fade In + Level 5 Medium + flick ending, calligraphic tail (variant of `ink`)
+- `wet_sketch` — Sketchy + Level 5 Medium + Light scratch, loose pencil-sketch look
 
 ### Dry family (10)
 - `dry_ends` — scheme "ends", size 4.0, hard tilt + max scratch
@@ -32,6 +38,10 @@ Full catalog of BRUSH_STYLES entries, valid profile keys, and grid layout conven
 - `dry_staccato` — scheme "mid_short", size 2.0, Level 1 Driest, Maximum, tilt(-30,-10)
 - `dry_tilt_stroke` — scheme "ends", size 3.0, tilt(-60,0), Level 1 Driest, Maximum
 - `dry_dot_chain` — scheme "ends", size 2.5, Flick pressure, Level 1 Driest, Maximum, tilt(-20,-10)
+- `dry_scatter` — scheme "ends", size 3.0, Level 1 Driest, Maximum, multi-tuft scatter
+- `dry_hair` — scheme "ends", size 1.5, Level 1 Driest, Maximum, thin hairline scratch
+- `dry_mid_path` — `build_dry_path_stroke` (ANY path), height-tapered 飞白, size 3.0
+- `dry_mid_path_flat` — `build_dry_path_stroke` uniform scratch (no height taper)
 
 ## Dry Scratch Styles (current, as of 2026-07-29)
 - `dry_scratch` — scheme "ends", size 3.5, hard tilt + max scratch + Triple Bell
@@ -80,3 +90,13 @@ none, shiver, scratch, skitter.
 - Clamp x to [-4.8, +4.8] to avoid off-paper clipping
 - Use small sizes (0.7–1.1) so brush footprints fit within cells with margin
 - Vision model is unreliable for positioning audits — use programmatic Y-projection or coordinate checks instead
+
+## Phased Stroke Model (per-phase wetness / tilt / gradient)
+
+Beyond the named `BRUSH_STYLES`, a stroke can be composed per-phase: the
+**beginning**, **mid**, and **end** each carry their own wetness, tilt,
+gradient-loading, scratch, and pressure peak. See `references/phased-strokes.md`
+and `scripts/phased_stroke.py` (`build_phased_stroke`). This is the primary way
+to get "wet vs dry, tilt=0 vs tilt-to-side, gradient painting, with per-phase
+variation" on a single continuous stroke. Tests: `tests/test_phased_stroke.py`
+(run `bash scripts/run_tests.sh`).
