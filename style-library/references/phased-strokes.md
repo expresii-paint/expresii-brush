@@ -82,16 +82,15 @@ python scripts/phased_stroke.py               # prints 3 demo strokes as .xst
 
 ## z-coupling note
 
-`phased_stroke` emits `z = 0.0625 − 0.25·p`, matching the canonical
-`build_path_stroke` / `build_dry_path_stroke` emitters in `scripts/send_strokes.py`.
-(Note: `verify_xst.py --flat` ships with `0.125` as its flat coefficient; that tool's
-`--flat` is a different (weaker) coupling than what the emitters actually use, so
-`verify_xst.py --flat` will flag canonical emitter output too. Use the phased-stroke
-self-test / `tests/test_phased_stroke.py` for structural verification — they assert
-against the real `0.25` coupling.)
+`phased_stroke` emits `z = 0.021875 − 0.154167·p` (the **recorded** coupling from
+`references/recorded-wire-format.md`), with lift z = `+0.021875`. Pressure is
+capped at the recorded max `p = 0.75`, so z never drops below the recorded
+footprint floor (`−0.09375`). This matches the brush-down/footprint rule: contact
+is detected by pressure going 0→>0 (nothing between the two `s` frames), and
+while p>0 the brush is lowered so the tuft intersects the paper and leaves a mark.
 
 - brush-down invariant holds on a 3-phase stroke
-- z-coupling matches `z = 0.0625 − 0.25·p` on every frame
+- z-coupling matches `z = 0.021875 − 0.154167·p` on every frame (recorded floor)
 - wetness varies across phases (≥2 distinct `w` levels)
 - tilt varies across phases (≥2 distinct tilt states)
 - color re-issued ≥3 times (begin/mid/end)

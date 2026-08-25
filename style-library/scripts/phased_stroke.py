@@ -52,8 +52,9 @@ from send_strokes import (  # noqa: E402
     SCRATCH_PROFILES,
 )
 
-Z_LIFT = 0.06250
-Z_COUP = 0.25  # z = Z_LIFT - Z_COUP * p  (matches build_path_stroke)
+Z_LIFT = 0.021875          # recorded lift height (paper intersection plane ~here)
+Z_COUP = 0.154167         # recorded coupling: z = Z_LIFT - Z_COUP * p
+                           # (verified exactly: z = -0.09375 at p = 0.75)
 
 
 def _default_phase():
@@ -155,43 +156,61 @@ def build_phased_stroke(waypoints, size=6.0,
     if cres0 is not None:
         lines += _emit_color_lines(cres0)
 
-    # leading lift bookend (brush DOWN) — pressure 0
+    # leading lift bookend (brush UP) — pressure 0, z at lift height
     x0, y0 = pts[0]
     lines.append(f"s {x0:.5f} {y0:.5f} {Z_LIFT:.5f} 0 0 0 0.00000")
 
     # ---- frame emission with per-phase state ----
+    # Brush-down rule (canonical, per user): contact is detected by pressure
+    # going 0 -> >0 with NOTHING between the two frames. So the FIRST emitted
+    # frame after the lift must be a press (p > 0) and carry NO intervening
+    # command. Phase-change re-issues (l/w/i/tilt) happen only at k>=2 (i.e.
+    # after the first press, between two already-pressed s frames).
+    # While p > 0 the brush is down and z must be lowered (z = Z_LIFT - Z_COUP*p)
+    # so the tuft intersects the paper and leaves a footprint.
     last_phase = None
     for k in range(segments + 1):
         t = k / segments
         phase_name = _phase_at(t, begin_end, end_len)
         ph = {"begin": b, "mid": m, "end": e}[phase_name]
 
-        x, y = xy_at(t)
-        # pressure: bell peak scaled by this phase's peak
-        base = _interp(PRESSURE_PROFILES["Smooth Bell"], t)
-        p = max(0.0, min(1.0, base * ph["peak"] / 0.75))  # bell peaks ~0.75
-        # ensure first pressed frame is >0 even at low phase-peak
-        if k > 0 and p < 0.02:
-            p = 0.02
-        z = Z_LIFT - Z_COUP * p
+        if k == 0:
+            continue  # skip the duplicate-zero frame; lift already emitted
+        x, y = xy_at(t)  # sample the path at this progress point
+        if k == 1:
+            p = 0.25  # hard first press (matches recorded first-press)
+        else:
+            base = _interp(PRESSURE_PROFILES["Smooth Bell"], t)
+            # Cap at the recorded max pressure (0.75) so z never drops below
+            # the recorded footprint floor (z = 0.021875 - 0.154167*0.75 = -0.09375).
+            p = max(0.0, min(0.75, base * ph["peak"] / 0.75))
+        z = Z_LIFT - Z_COUP * p  # lowered while down -> footprint
 
-        # re-issue tilt + color + w + i whenever the phase changes
-        if phase_name != last_phase:
-            pitch, roll = _tilt_of(ph)
-            if pitch == 0.0 and roll == 0.0 and (ph.get("gradient") or ph.get("solid")):
-                pitch, roll = _AUTOTILT
+        pitch, roll = _tilt_of(ph)
+
+        # The FIRST press (k==1) carries NO preceding command (brush-down rule).
+        # For k>=2, re-issue phase color/w/i when the phase changed (both frames
+        # are already pressed, so the brush stays down across the re-issue).
+        if k >= 2 and phase_name != last_phase:
             cres = _color_resolve(ph)
             if cres is not None:
                 lines += _emit_color_lines(cres)
             lines.append(f"w {ph['wetness']:.5f}")
             lines.append(f"i {ph['scratch']:.5f}")
             last_phase = phase_name
-        else:
-            pitch, roll = _tilt_of(ph)
+        elif last_phase is None:
+            # lock in begin phase on the first press; emit its w/i right AFTER
+            # the press frame (below) so nothing sits between lift and press.
+            last_phase = phase_name
 
+        # emit the s frame (with this phase's tilt)
         lines.append(
             f"s {x:.5f} {y:.5f} {z:.5f} {pitch:.5f} {roll:.5f} 0 {p:.5f}")
-        if k > 0:
+        if k == 1:
+            # first press: now (brush is down) set the begin-phase wetness/scratch
+            lines.append(f"w {ph['wetness']:.5f}")
+            lines.append(f"i {ph['scratch']:.5f}")
+        elif k > 1:
             lines.append(f"w {ph['wetness']:.5f}")
             lines.append(f"i {ph['scratch']:.5f}")
 
@@ -220,15 +239,25 @@ def _self_test():
     )
     lines = xst.splitlines()
     s_frames = [l for l in lines if l.startswith("s ")]
-    # 1. brush-down invariant: first two s frames are p 0 -> >0, consecutive
+    # 1. BRUSH-DOWN INVARIANT (canonical, per user):
+    #    lift frame p=0, then IMMEDIATELY (next line, no command between) a
+    #    press frame p>0. If any non-s line sits between them, contact is
+    #    missed and no footprint is made.
     p0 = float(s_frames[0].split()[7])
     p1 = float(s_frames[1].split()[7])
     assert p0 == 0.0 and p1 > 0.0, f"brush-down broken: {p0} -> {p1}"
-    # 2. every frame z matches coupling
+    # nothing between lift and first press:
+    idx0 = lines.index(s_frames[0])
+    idx1 = lines.index(s_frames[1], idx0 + 1)
+    between = lines[idx0 + 1:idx1]
+    assert between == [], f"commands between lift and first press break brush-down: {between}"
+    # 2. every frame with p>0 has z lowered below lift (footprint engaged)
     for l in s_frames:
         parts = l.split()
         p, z = float(parts[7]), float(parts[3])
         assert abs(z - (Z_LIFT - Z_COUP * p)) < 1e-4, f"z coupling off: {l}"
+        if p > 0:
+            assert z < Z_LIFT, f"brush down (p>0) but z not lowered -> no footprint: {l}"
     # 3. phase re-issues happened (multiple w levels -> gradient in wetness)
     ws = [float(l.split()[1]) for l in lines if l.startswith("w ")]
     assert len(set(round(w, 3) for w in ws)) >= 2, "phases did not change wetness"
