@@ -75,25 +75,50 @@ Plain text, one command per line, `#` for comments, space-separated params. The 
 | `i` | `i <scratch>` | 0.0–1.0 | Set brush scratchiness (dry-brush texture) |
 | `l` | `l <node> <R> <G> <B>` | 0–255 | Set color at brush node (9 nodes: 0=tip, 8=root). Binds to the most recent `C` profile; omit `C` to use the currently-selected profile. |
 | `s` | `s <x> <y> <z> <tY> <tX> <barrel> <pressure>` | pressure 0–1 | One stroke frame |
+| `'` | `' <Title>` | — | **Name the stroke-set** (the XST "title" / filename). Exactly one `'` then a space then any text. Put it right after the version line (see below). Expresii shows it in the command console so you can tell what was sent. Optional but recommended. |
 | `basecolor` | `basecolor <r> <g> <b>` | 0–255 each | **Paper background color.** Sets the canvas base color (RGB bytes). Put it in the **setup block, before `# End of Setup`** so it applies to the whole painting. Emit once at the top (after `c` if you also clear), not between strokes. |
+
+**CRITICAL — the v0.8 version line is REQUIRED as line 1.** The XST MUST
+begin with:
+
+```text
+# Expresii Stroke File v0.8
+```
+
+Without it, the server (v2026.08.21+) **collapses the Y coordinate** — every
+stroke renders as a flat horizontal line (X is preserved, Y is ignored). The
+spec says a missing version line is "assumed LATEST", but empirically this
+build needs the explicit header or Y is lost. The helper (`send_xst`) now
+prepends it automatically via `_ensure_version()`, and `build_phased_stroke`
+includes it — so generated strokes are safe, but if you hand-write XST,
+ALWAYS lead with this line. A `'` title line goes immediately after it.
 
 **Coordinate system (Expresii XST v0.8+):** `+Y is UP` (Cartesian / SVG-aligned) — the same direction as standard math and screen-Y-up. This changed at v0.8: pre-v0.8, +Y was down and strokes had to negate Y at emit. **Do NOT flip the Y sign when authoring for v0.8+** — emit your y directly. The helper and this skill assume v0.8+; if you are targeting an older Expresii, negate y in your emit. (Tilt-Y/Tilt-X signs are unchanged: Tilt-Y+ = North/up, Tilt-X− = East.)
 
 
-**The z-pressure coupling is load-bearing, not decorative.** Empirically derived from sample strokes:
+**The z-pressure coupling is load-bearing, not decorative.** Derived from the
+recorded .XST format (references/recorded-wire-format.md) and confirmed against
+a live render (a stroke with an over-deep z deposited nothing — the tuft passed
+through the paper):
 
 ```text
-z = 0.0875 − 0.4625 × pressure     # lift z=+0.0875 at p=0, press z=−0.375 at p=0.75
+z = 0.021875 − 0.154167 × pressure     # lift z=+0.021875 at p=0, z=−0.09375 at p=0.75
 ```
 
-- `pressure = 0.0` → `z = +0.0875` (brush fully lifted, no contact)
-- `pressure = 0.5` → `z = −0.14375`
-- `pressure = 0.75` → `z = −0.375` (pressed into paper, more pigment deposit)
-- `pressure = 1.0` → `z = −0.0625` (max press, max deposit)
+- `pressure = 0.0` → `z = +0.021875` (brush lifted just above the paper)
+- `pressure = 0.75` → `z = −0.09375` (recorded max press; the footprint floor)
+- **Cap pressure at 0.75.** Going past it drives z below the recorded floor and
+  the tuft over-presses (or, with the OLD 0.0875/0.4625 coupling, z goes wildly
+  negative). Recorded strokes never exceed p=0.75.
+- An over-deep z (e.g. z = −0.16) makes the brush pass *through* the paper plane
+  → no footprint → blank stroke even though the POST returns 200. This is a
+  classic "sent it but nothing drew" cause.
 
-Setting `z = 0` with non-zero pressure produces a thin, barely-visible stroke — the brush is at the threshold of contact, not actually pressing in. To get a visible, pigmented line, either commit to the formula above, or use `pressure ≥ 0.7` with `z ≤ −0.025`.
+To lift the brush between strokes, set `pressure = 0` and `z = +0.021875`.
 
-To lift the brush between disconnected strokes, set `pressure = 0` and `z = 0.0625` (which is what the formula gives you for free — no need to compute it).
+> NOTE: an older skill revision stated `z = 0.0875 − 0.4625 × p`. That coupling
+> is WRONG and will make strokes fail to deposit. Use the 0.021875 / 0.154167
+> values above (the helper already does).
 
 ### Bookend frames (brush up/down events)
 
@@ -263,6 +288,17 @@ specific layer (see the `L` command above). Add your own by appending to
   (Roll −54, Pitch 0); toward you (North) is (0, +57). **Magnitude matters:**
   a bigger splay shows more of the root (node-8) color, which is how a tuft
   gradient paints across the paper. Verified against recorded samples.
+- **Feibai (飛白 / flying-white) needs THREE levers, not two.** The broken
+  white streaks come from **low pressure + low wetness + high speed** at the end
+  of a stroke. Wetness + scratchiness alone are NOT enough — if the brush stays
+  pressed and slow, you get a solid line, not feibai. Concretely, for a dry tail:
+  ramp wetness → ~0.02–0.05, taper pressure to ~0.4 (light touch), and **stretch
+  the frame spacing in the outer half** so the tuft travels faster there. A
+  scratch cap around 0.45 (not 1.0) and a modest tilt (~28°) give streaks rather
+  than full scatter; push scratch/tilt higher only if you want more breakup.
+  Keep the stroke SOLID longer by holding wetness high until ~45% of the arm,
+  then ramping dry by ~85%. Tuning recipe lives in `phased_stroke` / the
+  spiral-feibai demos.
 - **Multipart form, not raw POST.** Sending the XST as the request body with `Content-Type: text/plain` will not work. It must be a `multipart/form-data` form with a field named `message`. The helper handles this; do not roll your own `curl -d @file` shortcut.
 - **No auth in the protocol.** Anyone on the local network who can reach port 9000 can drive the brush. If you're on a shared network, treat that as a risk.
 - **The server returns 200 on success even for invalid commands.** If your XST is malformed, the canvas just won't change. Verify by checking the stroke-recorder window in Expresii.
@@ -273,7 +309,16 @@ specific layer (see the `L` command above). Add your own by appending to
 After sending, the helper exits 0 on success and prints `OK  sent N chars to <host>:<port> (HTTP <code>)`. To verify the stroke actually rendered:
 
 - **Authoritative:** look at the Expresii canvas/window directly (or have the user screenshot it).
-- **Self-verify (reliable):** pass `--verify OUT.png`. The helper mirrors the official Command Console client: it POSTs `message` (+ `maxWidth`/`maxHeight` placeholder fields, for wire-format parity) to `/confirm-ajax`, then polls `GET /result/<id>` every ~0.9s and saves the frame only once the server reports `status == "done"` (carrying the final `imageBase64`). The reliable result comes from waiting for `done` — that's why the client "always returns the correct image" instead of grabbing a first-served (possibly previous/stale) frame. The captured frame is THIS render. If it still fails, the authoritative check is the Expresii window. Tune with `--verify-retries N` / `--verify-wait S`.
+- **`/capture` is the RELIABLE live grab.** `GET /capture` returns the current
+  paper as base64 PNG. After sending, **wait ~9–10s** for playback + the
+  post-playback snapshot to settle, then fetch `/capture`. This shows what
+  Expresii ACTUALLY painted (including correct Y) and is the endpoint to use
+  for "what did my strokes look like".
+- **`/result/<id>` is NOT reliable on this build.** It frequently returns a
+  STALE or BLANK frame (often a leftover from a much earlier render) even when
+  `status == "done"`. Do NOT trust `/result` for visual verification — use
+  `/capture` after the settle delay. (The helper's `fetch_render` polls
+  `/result`; prefer capturing separately via the `/capture` endpoint instead.)
 - **Cancel a queued job:** `cancel_render(host, port, request_id)` sends `DELETE /cancel/<id>` and reports success only when the server replies `{"status":"cancelled"}` — the job is still sitting in the server queue. A job that already left the queue (rendering/done) is refused with `{"status":"cannot_cancel"}` (or `not_found` for an unknown id); that's "too late", not an error. `fetch_render(..., cancel_cb=fn)` checks `fn()` on every `queued`/`rendering` poll and cancels + returns `{'ok': False, 'cancelled': True}` when it returns truthy — use it to abort a long wait (Ctrl-C / user timeout) instead of polling forever.
 - **Server protocol (from the Delphi source):** the server shares ONE global stroke recorder across threads, and `RenderComplete` fills the *first not-ready* result slot (not the request that triggered it). After playback it snapshots the paper on a ~5s post-playback timer that RESETS on every new command. Reliable-send consequences: (1) **never have two commands in flight** — back-to-back sends race on the shared recorder and the first-not-ready slot, so they merge or return a stale image; (2) **await `done` before the next send** — `done` only appears after that snapshot fires. The server emits only `rendering`/`done` (no `queued`; `fetch_render` tolerates a `queued` state defensively). `send_xst` serializes every POST through a process-wide lock (mirroring the console's "Send & Render" button disabling itself while one command renders) and `fetch_render` blocks until `status == 'done'`, so a single `--verify` already does the right thing — no fixed `sleep` is required. `--pace N` optionally waits N seconds after `done` to fully clear the 5s window when you deliberately pipeline several XSTs in one run. Safest of all: combine multiple strokes into ONE `.xst` (clear + all strokes) and send it as a single POST.
 - For automated tests, count the frames in your XST and confirm `sent_chars` matches what you expected to send.

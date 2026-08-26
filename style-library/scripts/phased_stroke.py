@@ -49,8 +49,19 @@ if _PARENT not in sys.path:
 from send_strokes import (  # noqa: E402
     _resolve_color, _color_l_gradient, _color_l_all_nodes,
     _color_l_ramp, _interp, _AUTOTILT, PRESSURE_PROFILES, WETNESS_PROFILES,
-    SCRATCH_PROFILES,
+    SCRATCH_PROFILES, XST_VERSION_LINE,
 )
+
+# Ensure the generated XST starts with the v0.8 version line (REQUIRED on
+# server v2026.08.21+, else Y collapses). build_phased_stroke already emits a
+# title/header, so we just guarantee the version line leads.
+def _with_version(text):
+    if text.startswith(XST_VERSION_LINE):
+        return text
+    # bump a stray version line (if any) and put it first
+    body = "\n".join(ln for ln in text.splitlines()
+                     if ln.strip() != XST_VERSION_LINE)
+    return XST_VERSION_LINE + "\n" + body + "\n"
 
 Z_LIFT = 0.021875          # recorded lift height (paper intersection plane ~here)
 Z_COUP = 0.154167         # recorded coupling: z = Z_LIFT - Z_COUP * p
@@ -93,7 +104,8 @@ def _tilt_of(phase):
 def build_phased_stroke(waypoints, size=6.0,
                         begin=None, mid=None, end=None,
                         begin_end=0.18, end_len=0.18,
-                        segments=24, closed=False, color_mode="gradient"):
+                        segments=24, closed=False, color_mode="gradient",
+                        title=None):
     """
     Build one continuous stroke whose look changes across phases.
 
@@ -137,7 +149,10 @@ def build_phased_stroke(waypoints, size=6.0,
     # ---- header (recorded-format preamble: makes it PAINT) ----
     # Build the T/w/C/B/e/k preamble manually (NOT via _star_header, which always
     # emits its rainbow default) so the begin phase's color is the first color.
-    lines = [
+    lines = []
+    if title:
+        lines.append(f"' {title}")  # stroke-set name (XST title command)
+    lines += [
         "T   0.00000",
         f"w   {b['wetness']:.5f}",
         "C   4.00000",
@@ -217,7 +232,7 @@ def build_phased_stroke(waypoints, size=6.0,
     if not closed:
         x1, y1 = pts[-1]
         lines.append(f"s {x1:.5f} {y1:.5f} {Z_LIFT:.5f} 0 0 0 0.00000")
-    return "\n".join(lines) + "\n"
+    return _with_version("\n".join(lines) + "\n")
 
 
 # --------------------------------------------------------------------------

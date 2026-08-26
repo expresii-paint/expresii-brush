@@ -32,6 +32,30 @@ import time
 import urllib.parse
 from pathlib import Path
 
+# v0.8 XST version line. REQUIRED as the FIRST line on server v2026.08.21+:
+# without it the server collapses the Y coordinate (strokes render as flat
+# horizontal lines while X is preserved). The spec says a missing version line
+# is "assumed LATEST", but empirically that build needs the explicit header.
+XST_VERSION_LINE = "# Expresii Stroke File v0.8"
+
+
+def _ensure_version(xst_text: str) -> str:
+    """Guarantee `xst_text` begins with the v0.8 version line.
+
+    If the text already starts with the version line, return it unchanged.
+    Otherwise strip any stray version line buried in the text and prepend a
+    fresh one as line 1. This is the single chokepoint (called from send_xst)
+    so every POST carries the header without touching each emitter, and never
+    double-emits it.
+    """
+    text = xst_text.lstrip("\n")
+    if text.startswith(XST_VERSION_LINE):
+        return text
+    # remove any existing (non-first-line) version declaration to avoid dupes
+    lines = [ln for ln in text.splitlines()
+             if ln.strip() != XST_VERSION_LINE]
+    return XST_VERSION_LINE + "\n" + "\n".join(lines) + "\n"
+
 
 def ping(host: str, port: int, timeout: float = 2.0) -> bool:
     """Check if Expresii's stroke server is reachable on host:port."""
@@ -66,6 +90,7 @@ def send_xst(host: str, port: int, xst_text: str, timeout: float = 10.0,
     optional 'error'.
     """
     with _SEND_LOCK:
+        xst_text = _ensure_version(xst_text)
         return _send_xst_unsafe(host, port, xst_text, timeout,
                                  max_width, max_height)
 
@@ -1091,17 +1116,34 @@ def _dry_ramp_ends(fx):
     return 0.010
 
 
-def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0), size=None):
+def _path_y(path, fx):
+    """Lateral y-offset of `path` (list of (x, y)) at normalized fx in [0,1]."""
+    if not path:
+        return 0.0
+    m = max(1, len(path) - 1)
+    kf = fx * m
+    i = min(m - 1, int(kf))
+    f = kf - i
+    y0 = path[i][1]
+    y1 = path[i + 1][1]
+    return y0 + (y1 - y0) * f
+
+
+def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0), size=None, path=None):
     """One horizontal dry stroke for the given scheme. Returns XST lines.
 
     size: brush size (XST `B`). If None, the scheme's default is used.
           Pass e.g. 4-6 for a thicker, more visible wiggling dry stroke.
+    path: optional list of (x, y) the stroke should follow (lateral wobble).
+          When given, fx maps along the path; the path's y offsets the row so
+          wobble/tilt variants show their defining motion instead of a flat line.
     """
     L = []
     if scheme == "ends":
         B, scratch, tilt = (size if size is not None else 1.0), 1.0, (-50.0, -15.0)
         zcoup = 0.165
         peak = 0.75
+        floor = 0.45                                  # pressure floor so tips mark
         seg = 90
         L += _dry_header(B, color, scratch)
         # brush DOWN: two lift dwells, then solid first press (no w/i between)
@@ -1113,14 +1155,17 @@ def _dry_line(scheme, y, x0, x1, idx, n, color, seed_tilt=(-5.0, -3.0), size=Non
             f2 = min(1.0, f + 1.0 / seg)
             fx = (f + f2) / 2.0
             x = x0 + (x1 - x0) * fx
-            p = peak * math.sin(math.pi * fx)
-            if fx > 0.86:                      # end dip -> feathered tip
-                p *= max(0.0, (1.0 - fx) / 0.14)
+            if path:                                  # follow lateral wobble
+                yy = y + _path_y(path, fx)
+            else:
+                yy = y
+            # floored envelope -> dry tips still deposit (full-length stroke)
+            p = peak * (floor + (1.0 - floor) * math.sin(math.pi * fx))
             z = Z_LIFT_DRY - zcoup * p
             w = _dry_ramp_ends(fx)
             if w != last_w:
                 L.append(f"w {w:.5f}"); last_w = w
-            L.append(f"s {x:.5f} {y:.5f} {z:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 {p:.5f}")
+            L.append(f"s {x:.5f} {yy:.5f} {z:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 {p:.5f}")
             f = f2
         L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
         L.append(f"s {x1:.5f} {y:.5f} {Z_LIFT_DRY:.5f} {tilt[0]:.5f} {tilt[1]:.5f} 0 0.00000")
@@ -1273,7 +1318,7 @@ def build_dry_strokes(n: int = 3, x0: float = -3.0, x1: float = 3.0,
                       ytop: float = 2.5, ystep: float = -1.0,
                       scheme: str = "ends", color=(30, 90, 200),
                       clear_first: bool = True, layer: int = None,
-                      size: float = None) -> str:
+                      size: float = None, path=None) -> str:
     """Build N horizontal dry-brush strokes (the three validated recipes).
 
     scheme:
@@ -1303,7 +1348,7 @@ def build_dry_strokes(n: int = 3, x0: float = -3.0, x1: float = 3.0,
         parts.append("c")
     for i in range(n):
         y = ytop + i * ystep
-        parts.append("\n".join(_dry_line(scheme, y, x0, x1, i, n, color, size=size)))
+        parts.append("\n".join(_dry_line(scheme, y, x0, x1, i, n, color, size=size, path=path)))
     return "\n".join(parts) + "\n"
 
 
@@ -1617,6 +1662,43 @@ BRUSH_STYLES = {
 }
 
 
+def _style_dry_path(style: str, x0: float, x1: float, samples: int = 48):
+    """Synthesize a sample path so a dry style's defining motion is visible.
+
+    Straight styles keep a flat line; wobble variants get a lateral snake whose
+    frequency/amplitude encodes the style (so they look DIFFERENT in a catalog
+    instead of all collapsing to one flat scratch line). y is lateral (screen
+    vertical in v0.8 +Y-up); the row's base y is added later by _dry_line.
+    """
+    import math as _m
+    span = abs(x1 - x0)
+    if span < 1e-6:
+        return None
+    cfg = {
+        # name:            (amp, cycles, phase)
+        "dry_wobble":        (0.35, 4.0, 0.0),
+        "dry_wobble_wide":   (0.70, 2.0, 0.0),
+        "dry_wobble_tight":  (0.22, 9.0, 0.0),
+        "dry_tilt_stroke":   (0.0,  0.0, 0.0),   # tilt handled by scheme, flat ok
+        "dry_scratch":       (0.0,  0.0, 0.0),   # pure hard-tilt scratch, flat
+        "dry_staccato":      (0.0,  0.0, 0.0),
+        "dry_dot_chain":     (0.0,  0.0, 0.0),
+        "dry_ends":          (0.0,  0.0, 0.0),
+        "dry_mid":           (0.0,  0.0, 0.0),
+        "dry_mid_short":     (0.0,  0.0, 0.0),
+    }
+    amp, cycles, phase = cfg.get(style, (0.0, 0.0, 0.0))
+    if amp == 0.0 and cycles == 0.0:
+        return None
+    path = []
+    for i in range(samples + 1):
+        fx = i / samples
+        x = x0 + span * fx
+        y = amp * _m.sin(2 * _m.pi * cycles * fx + phase)
+        path.append((x, y))
+    return path
+
+
 def build_style_stroke(style: str, waypoints: list = None,
                        x0: float = -3.2, x1: float = 3.2, ytop: float = 2.5,
                        ystep: float = -1.0, n: int = 3, color=(30, 90, 200),
@@ -1655,7 +1737,8 @@ def build_style_stroke(style: str, waypoints: list = None,
     else:  # dry (horizontal)
         block = build_dry_strokes(n=n, x0=x0, x1=x1, ytop=ytop, ystep=ystep,
                                   scheme=spec["scheme"], color=color,
-                                  clear_first=False, size=effective_size)
+                                  clear_first=False, size=effective_size,
+                                  path=_style_dry_path(style, x0, x1))
     if layer is not None:
         block = f"L {int(layer)}\n" + block
     return block
