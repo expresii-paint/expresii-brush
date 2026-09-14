@@ -93,44 +93,34 @@ prepends it automatically via `_ensure_version()`, and `build_phased_stroke`
 includes it — so generated strokes are safe, but if you hand-write XST,
 ALWAYS lead with this line. A `'` title line goes immediately after it.
 
-**Coordinate system (Expresii XST v0.8+):** `+Y is UP` (Cartesian / SVG-aligned) — the same direction as standard math and screen-Y-up. This changed at v0.8: pre-v0.8, +Y was down and strokes had to negate Y at emit. **Do NOT flip the Y sign when authoring for v0.8+** — emit your y directly. The helper and this skill assume v0.8+; if you are targeting an older Expresii, negate y in your emit. (Tilt-Y/Tilt-X signs are unchanged: Tilt-Y+ = North/up, Tilt-X− = East.)
+**Coordinate system (Expresii XST v0.8):** `+Y is UP` (Cartesian / SVG-aligned) — the same direction as standard math and screen-Y-up. **Do NOT negate the Y sign when authoring strokes** — emit your y directly. (Tilt-Y/Tilt-X signs are unchanged: Tilt-Y+ = North/up, Tilt-X− = East.)
 
 
-**The z-pressure coupling is load-bearing, not decorative.** Derived from the
-recorded .XST format (references/recorded-wire-format.md) and confirmed against
-a live render (a stroke with an over-deep z deposited nothing — the tuft passed
-through the paper):
+**The z-pressure coupling is load-bearing, not decorative.** From the XST format spec (`references/xst-format.md`) — the canonical formula is:
 
 ```text
-z = 0.021875 − 0.154167 × pressure     # lift z=+0.021875 at p=0, z=−0.09375 at p=0.75
+z = 0.0625 − 0.125 × pressure     # lift z=+0.0625 at p=0; z=0 at p=0.5; z=−0.0625 at p=1.0
 ```
 
-- `pressure = 0.0` → `z = +0.021875` (brush lifted just above the paper)
-- `pressure = 0.75` → `z = −0.09375` (recorded max press; the footprint floor)
-- **Cap pressure at 0.75.** Going past it drives z below the recorded floor and
-  the tuft over-presses (or, with the OLD 0.0875/0.4625 coupling, z goes wildly
-  negative). Recorded strokes never exceed p=0.75.
-- An over-deep z (e.g. z = −0.16) makes the brush pass *through* the paper plane
-  → no footprint → blank stroke even though the POST returns 200. This is a
-  classic "sent it but nothing drew" cause.
+- `pressure = 0.0` → `z = +0.0625` (brush lifted just above the paper)
+- `pressure = 0.5` → `z = 0.0` (tip just touching the paper surface)
+- `pressure = 1.0` → `z = −0.0625` (max press; the deepest the tip goes)
+- **Every stroke's peak pressure should be ≥ 0.40** — safely above the contact threshold (~0.19).
+- An over-deep z (more negative than the formula gives at your pressure) makes the brush pass *through* the paper plane → no footprint → blank stroke even though the POST returns 200. This is a classic "sent it but nothing drew" cause.
 
-To lift the brush between strokes, set `pressure = 0` and `z = +0.021875`.
+To lift the brush between strokes, set `pressure = 0` and `z = +0.0625`.
 
-> NOTE: an older skill revision stated `z = 0.0875 − 0.4625 × p`. That coupling
-> is WRONG and will make strokes fail to deposit. Use the 0.021875 / 0.154167
-> values above (the helper already does).
-
-### Bookend frames (brush up/down events)
+### Brush-down / brush-up rule (REQUIRED)
 
 Expresii registers a stroke only when the brush transitions **lifted → contact → lifted**. For an **open** stroke (a line, a curve, anything that doesn't loop back to its start), bracket it with two bookend `s` frames:
 
 ```text
 # brush DOWN (lifted = pressure 0) at the start point
-s <x0> <y0> 0.08750 -26.0 -53.0 0 0.00000
+s <x0> <y0> 0.0625 -26.0 -53.0 0 0.00000
 # ... real stroke frames, pressure ramping 0 -> >0 (first frame MUST be >0) ...
-s <x0> <y0> 0.07911 -26.0 -53.0 0 0.00116
+s <x0> <y0> 0.05000 -26.0 -53.0 0 0.01000
 # brush UP (lifted = pressure 0) at the end point
-s <x1> <y1> 0.08750 -26.0 -53.0 0 0.00000
+s <x1> <y1> 0.0625 -26.0 -53.0 0 0.00000
 ```
 
 **`b` (brush marker) commands are NOT used and must be omitted.** Expresii
@@ -139,9 +129,6 @@ pressure goes `0 → >0`**, with NO other command between them. A `b` line betwe
 the lifted frame and the first press frame breaks that adjacency and the stroke
 silently makes no mark. The same applies in reverse for brush-up (`>0 → 0`).
 So: never emit `b`; let the consecutive `s` pressure transition carry contact.
-
-(Old reference recordings wrap marks in `b ... b` — that is app-internal and
-must NOT be reproduced when authoring XST. Omit `b` entirely.)
 
 **Closed loops are different.** For a circle/ring, do NOT add a trailing lift
 bookend — the loop's last contact frame already meets the first at the seam
@@ -169,7 +156,7 @@ The entire XST text is one form field named `message`. The server returns HTTP 2
 
 ### Coordinate system
 
-Expresii uses a normalized 3D coordinate system centered on the canvas. From the upstream spec, the brush tuft base sits in a small range like `x ∈ [-3, 3]`, `y ∈ [-3, 3]`, `z ∈ [-0.5, 0.5]`. Pressures cluster in `[0, 1]`. Tilts in degrees, typically `[-90, 90]`. Don't worry about exact bounds — start with values from the example stroke in the spec and tweak.
+Expresii uses a normalized 3D coordinate system centered on the canvas. **The Y extent is always −5 to +5 units** (a fixed 10-unit Y span, independent of paper size). **The X extent comes from the paper's aspect ratio: call `GET /state` (returns JSON including `paperWidth` and `paperHeight`), compute `aspect_ratio = paperWidth / paperHeight`, then derive `x_extent = 5 × aspect_ratio` (half-width in Expresii units).** Calibrate your strokes' X range to the X extent you compute, but treat Y as a fixed ±5 range. z ∈ roughly [−0.06, +0.06]; pressures in [0, 1]; tilts in degrees, typically [−90, 90].
 
 ## Procedure
 

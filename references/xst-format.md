@@ -201,10 +201,7 @@ w 0.50000
 
 - **Origin (0, 0, 0):** canvas center
 - **X axis:** right
-- **Y axis:** up **(+Y up, Cartesian/SVG-aligned — since Expresii XST v0.8).** Pre-v0.8, +Y was down and strokes negated Y at emit; that flip is gone in v0.8+. Do NOT negate Y when authoring for v0.8+.
-- **Z axis:** out of the canvas toward the viewer (positive z = brush lifted, negative z = brush pressed in)
-- **Tuft base** is the geometric anchor of the brush, *not* the tip — the tip extends from the tuft in the direction of the brush's normal
-- **Pressure 0** = brush not touching canvas (z = +0.0625); **Pressure 1** = fully pressed (z = −0.0625)
+- **Y axis:** up **(+Y up, Cartesian/SVG-aligned — since Expresii XST v0.8).** Pre-v0.8, +Y was down and strokes negated Y at emit; that flip is gone in v0.8+. **Do NOT negate Y when authoring for v0.8+.** **The Y extent is always −5 to +5 units** (a fixed 10-unit Y span centered on the canvas, independent of paper size). The **X extent follows from the paper's aspect ratio** and can be obtained from the app's API (which reports the paper size / aspect ratio). Calibrate strokes to the X extent you read from the API, but treat Y as a fixed ±5 range.
 
 ### The z-pressure coupling (empirical)
 
