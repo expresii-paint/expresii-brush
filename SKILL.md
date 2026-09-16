@@ -78,20 +78,15 @@ Plain text, one command per line, `#` for comments, space-separated params. The 
 | `'` | `' <Title>` | — | **Name the stroke-set** (the XST "title" / filename). Exactly one `'` then a space then any text. Put it right after the version line (see below). Expresii shows it in the command console so you can tell what was sent. Optional but recommended. |
 | `basecolor` | `basecolor <r> <g> <b>` | 0–255 each | **Paper background color.** Sets the canvas base color (RGB bytes). Put it in the **setup block, before `# End of Setup`** so it applies to the whole painting. Emit once at the top (after `c` if you also clear), not between strokes. |
 
-**CRITICAL — the v0.8 version line is REQUIRED as line 1.** The XST MUST
-begin with:
+**v0.8 version line.** The XST should begin with:
 
 ```text
 # Expresii Stroke File v0.8
 ```
 
-Without it, the server (v2026.08.21+) **collapses the Y coordinate** — every
-stroke renders as a flat horizontal line (X is preserved, Y is ignored). The
-spec says a missing version line is "assumed LATEST", but empirically this
-build needs the explicit header or Y is lost. The helper (`send_xst`) now
-prepends it automatically via `_ensure_version()`, and `build_phased_stroke`
-includes it — so generated strokes are safe, but if you hand-write XST,
-ALWAYS lead with this line. A `'` title line goes immediately after it.
+The helper (`send_xst`) always prepends this automatically via `_ensure_version()`,
+and `build_phased_stroke` includes it — so generated strokes are safe. If you
+hand-write XST, lead with this line. A `'` title line goes immediately after it.
 
 **Coordinate system (Expresii XST v0.8):** `+Y is UP` (Cartesian / SVG-aligned) — the same direction as standard math and screen-Y-up. **Do NOT negate the Y sign when authoring strokes** — emit your y directly. (Tilt-Y/Tilt-X signs are unchanged: Tilt-Y+ = North/up, Tilt-X− = East.)
 

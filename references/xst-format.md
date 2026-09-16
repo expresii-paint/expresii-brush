@@ -8,12 +8,17 @@ replay brush strokes.
 ## File structure
 
 Plain text. One command per line. Space-separated parameters. Lines starting
-with `#` are comments and are ignored. The file is read top-to-bottom; command
-state persists (so setting `B 4` then drawing frames uses size 4 for the
-whole stroke until you change it).
+with `#` are comments and are ignored.
+
+> **Version line (line 1):** The XST file must start with `# Expresii Stroke File v0.8`.
+> The helper (`send_xst` / `_ensure_version()`) always prepends this automatically,
+> so generated strokes are safe. When hand-writing XST, lead with this line.
+
+Command state persists (setting `B 4` then drawing frames uses size 4 for the whole
+stroke until you change it). The file is read top-to-bottom.
 
 ```
-# Comment line — anything starting with # is ignored
+# Expresii Stroke File v0.8
 c                     # clear canvas
 B 4.00000             # set brush size
 w 0.50000             # set brush wetness
@@ -26,19 +31,43 @@ s -2.4 -2.7 0.0 -33 -28 0 0.15  # next frame
 
 ## Commands
 
+### `'` — Title (REQUIRED; stroke-set name)
+
+```text
+' <Title>
+```
+
+A single-quote character, then a space, then any text (no quotes inside). There
+must be **exactly one `'` line in every XST file**. Expresii shows it in the
+stroke-recorder window so the user can identify what was sent. **Always emit a `'`
+title line** — every command set should be named. Place it right after the version
+line and before any config (`B`/`w`/`i`/`l`/...) or stroke (`s`) commands — near the
+top of the file. Example:
+
+```text
+# Expresii Stroke File v0.8
+' landscape-sky
+c
+B 4.00000
+w 0.45000
+i 0.00000
+l 0 135 185 225 255
+...
+```
+
 ### `s` — Stroke frame (defines one brush posture)
 
-```
-s <x> <y> <z> <Pitch> <Roll> <Turn> <Pressure>
+```text
+s <x> <y> <z> <Tilt-Y> <Tilt-X> <Barrel-Rotation> <Pressure>
 ```
 
 | Param | Meaning | Notes |
 |-------|---------|-------|
-| `x` `y` `z` | Position of the brush tuft base in 3D | Normalized canvas units, typically `[-3, 3]` for x/y, `[-0.5, 0.5]` for z |
-| `Pitch` | Brush tilt around the axis pointing away from the viewer | ~0 = brush held near-vertical; larger = leaning back/forward |
-| `Roll` | **Sideways splay** — rotation that lays the tuft flat | THIS is what spreads the tuft across the stroke. A gradient stroke uses Roll ≈ −44 (leaning toward 3 o'clock) so the node-0→node-8 color gradient shows across the WIDTH. Verified against a real recorded stroke. |
-| `Turn` | Brush roll around its own axis | Usually 0 |
-| `Pressure` | How hard the brush is pressed | Range `[0, 1]`, where 0 = no contact, 1 = max |
+| `x` `y` `z` | Position of the brush tuft base in 3D | **The Y extent is always −5 to +5 units** (a fixed 10-unit Y span centered on the canvas, independent of paper size). **The X extent comes from the paper's aspect ratio: call `GET /state` (returns JSON including `paperWidth` and `paperHeight`), compute `aspect_ratio = paperWidth / paperHeight`, then derive `x_extent = 5 × aspect_ratio` (half-width in Expresii units).** Calibrate your strokes' X range to the X extent you compute, but treat Y as a fixed ±5 range. z ∈ roughly [−0.06, +0.06] |
+| `Tilt-Y` | Brush tilt in degrees, around the Y axis | **Tilt-Y+ = tip points North (up).** |
+| `Tilt-X` | Brush tilt in degrees, around the X axis | **Tilt-X− = tip points East (right).** |
+| `Barrel-Rotation` | Brush roll around its own axis, degrees | Usually 0 |
+| `Pressure` | How hard the brush is pressed | Range `[0, 1]`, where 0 = no contact, 1 = max. **Every stroke's peak pressure should be ≥ 0.40** to be safely above the contact threshold (~0.19). |
 
 A *stroke* is a series of `s` lines with gradually changing x, y, and pressure
 while tilt stays roughly constant. Each frame is a snapshot of the brush
@@ -46,9 +75,9 @@ posture at one moment in time. Expresii interpolates between frames.
 
 **Brush-down registration (critical):** Expresii detects the brush touching
 the paper ONLY from **two consecutive `s` frames** where pressure goes
-`0 → >0`, with **NO other command between them** (`w`, `i`, `b`, `l`, … all
+`0 → >0`, with **NO other command between them** (`w`, `i`, `l`, … all
 break it). So a stroke must open with a lift frame `… 0.00000` immediately
-followed by a press frame `… <p> ` (p>0). Emit any `w`/`i` re-issues *after*
+followed by a press frame `… <p>` (p>0). Emit any `w`/`i` re-issues *after*
 that first press frame, never between the lift and the first press. A trailing
 lift (last frame of an open stroke) may be followed by nothing — that is
 brush-up, not brush-down, and is fine.
@@ -64,20 +93,6 @@ use it between strokes of the same composition.
 > (`ExpresiiStrokeFileFormatDescription.txt` documents only `s c C B w l i`).
 > Documented here from the app's actual behavior.
 
-```text
-# 'L' for selecting the active Layer by index. Format:
-# L layer_index
-# layer_index 0 is the TOPMOST layer; 1 is the layer directly below it; 2 the
-# one below that, and so on (top-down). Indices < 0 or > (layer_count - 1) are
-# IGNORED (no-op). Select a layer before a 'c'/'B'/'w'/'i'/'s' sequence to
-# paint on it.
-# Examples:
-L 0
-# ... c / B / w / i / s-frames for the long 'mid' stroke ...
-L 1
-# ... c / B / w / i / s-frames for the short 'mid_short' stroke ...
-```
-
 Selects the active layer by index. `x = 0` is the **topmost** layer, `1` is
 the layer directly below it, `2` the one below that, and so on. Indices are
 **top-down**: smaller x = higher in the stack.
@@ -85,31 +100,21 @@ the layer directly below it, `2` the one below that, and so on. Indices are
 - `x < 0` → ignored (no-op).
 - `x > (layer count − 1)` → ignored (no-op).
 
-Example — paint two overlapping dry-brush strokes on separate layers so each
-keeps its own trajectory/look, then let the layers composite:
-
-```text
-L 0
-# ... c / B / w / i / s-frames for the long 'mid' stroke ...
-L 1
-# ... c / B / w / i / s-frames for the short 'mid_short' stroke ...
-```
-
 ### `B` — Brush size
 
-```
+```text
 B <size>
 ```
 
 Range `[1.0, 7.0]`. Larger = thicker, broader strokes. Default is around 4.
 
-```
+```text
 B 4.00000
 ```
 
 ### `w` — Brush wetness
 
-```
+```text
 w <wetness>
 ```
 
@@ -117,7 +122,7 @@ Range `[0.01, 1.0]`. Higher = more water, more flowy/washy behavior. Lower =
 dryer, sharper, more control. The spec's example walks from `1.0` (very wet)
 down to `0.01` (almost dry) across "Wetness Level 12 to Wetness Level 1":
 
-```
+```text
 w 1.00000    # level 12 — very wet, watercolor wash
 w 0.65000    # level 10
 w 0.40000    # level 8
@@ -134,7 +139,7 @@ w 0.01000    # level 1 — almost dry
 
 ### `l` — Color loading (per brush node)
 
-```
+```text
 l <NodeIndex> <R> <G> <B> <A>
 ```
 
@@ -144,31 +149,15 @@ different colors at different nodes creates a gradient: the brush will pick
 up pigment at each node as the stroke is laid down, with the tip leaving
 node-0 color first and node-8 color last.
 
-```
-l 0 78 150 220 255     # tip: a sky blue
-l 1 143 118 188 255    # gradient toward purple
-l 2 222 78 149 255
-l 3 240 68 139 255
-l 4 225 78 147 255     # middle: hot pink
-l 5 208 96 158 255
-l 6 212 142 181 255
-l 7 245 223 226 255
-l 8 255 255 255 255    # root: white
-```
-
 ### `i` — Brush scratchiness
 
-```
+```text
 i <scratchiness>
 ```
 
 Range `[0.0, 1.0]`. Higher = more dry-brush texture, the brush "skips" on
 the canvas. `0` = smooth, no texture. Typical ink-wash: `0.0`–`0.2`.
 Typical dry-brush: `0.6`–`1.0`.
-
-```
-i 0.5
-```
 
 ### `basecolor` — Paper background color (setup block)
 
@@ -183,69 +172,61 @@ if you also clear), not between strokes. Without `basecolor` the paper defaults
 to its normal white/transparent; use it when you want a colored ground (e.g. a
 toned paper or a colored backdrop behind transparent strokes).
 
-```text
-c
-basecolor 240 235 220     # warm paper tone for the whole painting
-B 4.00000
-w 0.50000
-...
-# End of Setup
-... stroke frames ...
-```
-
-> Newer Expresii feature (v0.8+); not in the original stroke-file spec
-> (`ExpresiiStrokeFileFormatDescription.txt` documents only `s c C B w l i`).
-> Documented here from the app's actual behavior.
-
-## Coordinate system details
+## Coordinate system
 
 - **Origin (0, 0, 0):** canvas center
 - **X axis:** right
-- **Y axis:** up **(+Y up, Cartesian/SVG-aligned — since Expresii XST v0.8).** Pre-v0.8, +Y was down and strokes negated Y at emit; that flip is gone in v0.8+. **Do NOT negate Y when authoring for v0.8+.** **The Y extent is always −5 to +5 units** (a fixed 10-unit Y span centered on the canvas, independent of paper size). The **X extent follows from the paper's aspect ratio** and can be obtained from the app's API (which reports the paper size / aspect ratio). Calibrate strokes to the X extent you read from the API, but treat Y as a fixed ±5 range.
+- **Y axis:** up **(+Y up, Cartesian/SVG-aligned — since Expresii XST v0.8).**
+  **Do NOT negate Y when authoring for v0.8+.** **The Y extent is always −5 to +5
+  units** (a fixed 10-unit Y span centered on the canvas, independent of paper size).
+  The **X extent follows from the paper's aspect ratio**: call `GET /state` (returns
+  JSON including `paperWidth` and `paperHeight`), compute `aspect_ratio = paperWidth
+  / paperHeight`, then `x_extent = 5 × aspect_ratio`. Calibrate strokes to the X
+  extent you read from the API, but treat Y as a fixed ±5 range.
+- **Z axis:** out of the canvas toward the viewer (positive z = brush lifted,
+  negative z = brush pressed in)
 
-### The z-pressure coupling (empirical)
+### The z-pressure coupling (canonical)
 
 For a flat brush posture, the brush's z height is *coupled to pressure* by this
-formula, derived from sample strokes in the upstream spec:
+formula (canonical for v0.8 — derived from the XST format spec and confirmed against
+live renders):
 
-```
+```text
 z = 0.0625 − 0.125 × pressure
 ```
 
 | pressure | z          | meaning                       |
 |----------|------------|-------------------------------|
 | 0.00     | +0.0625    | fully lifted, no contact      |
-| 0.25     | +0.0313    | hovering, near paper          |
 | 0.50     |  0.0000    | tip just touching             |
-| 0.75     | −0.0313    | pressed in, normal stroke     |
 | 1.00     | −0.0625    | max press, max deposit        |
 
-If you set `z = 0` with non-zero pressure, you get a thin, almost-invisible
-stroke — the brush is at the threshold of contact. To get a clearly visible
-line, use `pressure ≥ 0.7` with `z ≤ −0.025`, or use the formula above and
-let the helper compute z for you.
+- **pressure = 0.0** → **z = +0.0625** (brush lifted just above the paper)
+- **pressure = 0.5** → **z = 0.0** (tip just touching the paper surface)
+- **pressure = 1.0** → **z = −0.0625** (max press; deepest the tip goes)
+- **Every stroke's peak pressure should be ≥ 0.40** — safely above the contact
+  threshold (~0.19).
+- An over-deep z (more negative than the formula gives at your pressure) makes
+  the brush pass *through* the paper plane → no footprint → blank stroke even
+  though the POST returns 200.
 
-## Tilts and barrel rotation
+To lift the brush between strokes, set `pressure = 0` and `z = +0.0625`.
 
-The `s` frame's orientation fields are **Pitch, Roll, Turn** (not "Tilt-Y/Tilt-X/Barrel-Rotation" — that was a misreading). The brush TUFT is splayed in **2D** so the 9-node color gradient fans across the paper:
+## Tilts
 
-- `Pitch`: rotation around the axis pointing away from the viewer. ~0 = brush near-vertical; **Pitch > 0 → tuft points North (toward you); Pitch < 0 → South.**
-- `Roll`: rotation around the vertical axis. **Roll > 0 → tuft points West; Roll < 0 → East.** This is the primary splay axis for a side-on gradient.
-- `Turn`: roll of the brush around its own axis. Usually 0.
+The `s` frame's orientation fields are **Tilt-Y and Tilt-X** (brush tilt in degrees,
+not "Pitch/Roll/Turn"). The brush TUFT is splayed in 2D so the 9-node color gradient
+fans across the paper:
 
-The **splay magnitude** (`|Roll| + |Pitch|`) controls how much of the root (node-8) color shows: a bigger splay lays the tuft flatter, exposing more of the bristle base.
+- **Tilt-Y:** rotation around the Y axis. **Tilt-Y+ → tip points North (up).**
+  Tilt-Y− → tip points South.
+- **Tilt-X:** rotation around the X axis. **Tilt-X− → tip points East (right).**
+  Tilt-X+ → tip points West.
 
-Verified against two recorded samples:
-
-| Sample | Direction | `s x y z Pitch Roll Turn` |
-|--------|-----------|---------------------------|
-| 4-direction dabs | East  | `… 1 -54 0`  → Roll=−54 |
-| 4-direction dabs | North | `… 57 3 0`   → Pitch=+57 |
-| 4-direction dabs | West  | `… 0 72 0`   → Roll=+72 |
-| 4-direction dabs | South | `… -67 -2 0` → Pitch=−67 |
-| tilt+rotate ring | lean 3 o'clock | `… 1 -44 0` → Roll=−44 |
-
-So the canonical mapping is: **East = Roll(−), West = Roll(+), North = Pitch(+), South = Pitch(−).**
+From the spec's example stroke, a "vertical-ish" brush posture is
+`Tilt-Y: -33, Tilt-X: -28` — meaning the brush is leaning back (South) and to the
+right (East) of vertical.
 
 ## Source
 
